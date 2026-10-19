@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds dist/Swivel-<version>.dmg: open it, drag Swivel onto Applications.
+# Builds dist/Swivel.dmg: open it, drag Swivel onto Applications. (Fixed name, so download links never break.)
 set -euo pipefail
 cd "$(dirname "$0")"
 ./build.sh
@@ -45,7 +45,7 @@ sync
 rm -rf "/Volumes/$VOL/.fseventsd"
 hdiutil detach -quiet "/Volumes/$VOL"
 mkdir -p dist
-rm -f "dist/Swivel-$VERSION.dmg"
-hdiutil convert -quiet "$WORK/rw.dmg" -format UDZO -imagekey zlib-level=9 -o "dist/Swivel-$VERSION.dmg"
+rm -f dist/Swivel.dmg
+hdiutil convert -quiet "$WORK/rw.dmg" -format UDZO -imagekey zlib-level=9 -o dist/Swivel.dmg
 rm -rf "$WORK"
-echo "Built dist/Swivel-$VERSION.dmg"
+echo "Built dist/Swivel.dmg (version $VERSION)"

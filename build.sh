@@ -30,11 +30,29 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key><string>Swivel</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>2.0</string>
+    <key>CFBundleVersion</key><string>2</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
+    <!-- Finder right-click items; an empty NSRequiredContext makes macOS show them by default -->
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key><dict><key>default</key><string>Convert with Swivel</string></dict>
+            <key>NSMessage</key><string>convertFiles</string>
+            <key>NSPortName</key><string>Swivel</string>
+            <key>NSRequiredContext</key><dict/>
+            <key>NSSendFileTypes</key><array><string>public.item</string><string>public.folder</string></array>
+        </dict>
+        <dict>
+            <key>NSMenuItem</key><dict><key>default</key><string>Share with Swivel</string></dict>
+            <key>NSMessage</key><string>fileActions</string>
+            <key>NSPortName</key><string>Swivel</string>
+            <key>NSRequiredContext</key><dict/>
+            <key>NSSendFileTypes</key><array><string>public.item</string><string>public.folder</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST

@@ -2,3 +2,4 @@
 build.noindex/
 test-out/
 .DS_Store
+test.sh

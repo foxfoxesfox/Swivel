@@ -45,7 +45,84 @@ enum Converter {
     }
 
     static func label(_ target: String) -> String {
-        target == "split" || target == "merge" ? target.capitalized : target.uppercased()
+        if target.hasPrefix("compress-") { return "Compress" }
+        if isTool(target) { return "Resize" }
+        return target == "split" || target == "merge" ? target.capitalized : target.uppercased()
+    }
+
+    // MARK: - Compress / resize (actions wheel)
+
+    /// Tool targets: "compress-high|balanced|small", "scale-<percent>", "fit-<longest side px>".
+    static func isTool(_ target: String) -> Bool {
+        target.hasPrefix("compress-") || target.hasPrefix("scale-") || target.hasPrefix("fit-")
+    }
+
+    /// Lossy image quality (0–1) and H.264 CRF for each compress level.
+    static let compressLevels: [String: (quality: Double, crf: Int)] = [
+        "compress-high": (0.8, 23), "compress-balanced": (0.6, 28), "compress-small": (0.4, 32),
+    ]
+
+    /// Photos always; videos only when ffmpeg can encode H.264.
+    static func canUseTools(_ url: URL) -> Bool {
+        imageIn.contains(ext(url)) || (videoIn.contains(ext(url)) && h264 != nil)
+    }
+
+    static func imageTool(_ src: URL, _ target: String) throws -> URL {
+        let image = try loadImage(src)
+        let e = ext(src)
+        if let level = compressLevels[target] {
+            // Lossless formats only shrink much as JPG.
+            let outExt = ["jpg", "heic", "webp", "avif"].contains(e) ? e : "jpg"
+            let out = output(for: src, suffix: " compressed", ext: outExt)
+            try save(image, to: out, ext: outExt, quality: level.quality)
+            return try keepIfSmaller(out, than: src)
+        }
+        let s = try scale(for: target, longest: max(image.width, image.height))
+        let w = max(1, Int((Double(image.width) * s).rounded())), h = max(1, Int((Double(image.height) * s).rounded()))
+        let space = image.colorSpace.flatMap { $0.model == .rgb ? $0 : nil } ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { throw ConvertError("Image too large") }
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let out = output(for: src, suffix: " resized", ext: e)
+        try save(ctx.makeImage()!, to: out, ext: e)
+        return out
+    }
+
+    static func videoTool(_ src: URL, _ target: String) throws -> URL {
+        let e = ext(src)
+        var filter = "scale=trunc(iw/2)*2:trunc(ih/2)*2", crf = 20
+        if let level = compressLevels[target] {
+            crf = level.crf
+        } else if target.hasPrefix("scale-") {
+            let p = try scale(for: target, longest: Int.max)
+            filter = "scale=trunc(iw*\(p)/2)*2:-2"
+        } else {
+            let n = Int(target.dropFirst(4)) ?? 1280 // fit-<n>: longest side, never enlarged, even sizes for H.264
+            filter = "scale=w='if(gte(iw,ih),trunc(min(iw,\(n))/2)*2,-2)':h='if(gte(iw,ih),-2,trunc(min(ih,\(n))/2)*2)'"
+        }
+        let out = output(for: src, suffix: compressLevels[target] == nil ? " resized" : " compressed", ext: e)
+        try ffmpeg(["-i", src.path] + videoArgs(e, filter: filter, crf: crf), out)
+        return compressLevels[target] == nil ? out : try keepIfSmaller(out, than: src)
+    }
+
+    /// Scale factor for "scale-50" (50%) or "fit-1280" (longest side 1280px).
+    static func scale(for target: String, longest: Int) throws -> Double {
+        let n = Double(target.split(separator: "-").last.flatMap { Int($0) } ?? 100)
+        if target.hasPrefix("scale-") { return n / 100 }
+        guard Double(longest) > n else { throw ConvertError("Already \(Int(n)) px or smaller, so it wasn't resized") }
+        return n / Double(longest)
+    }
+
+    /// Deletes `out` if compressing didn't make it smaller.
+    static func keepIfSmaller(_ out: URL, than src: URL) throws -> URL {
+        let size = { (url: URL) in (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 }
+        guard size(out) < size(src) else {
+            try? FileManager.default.removeItem(at: out)
+            throw ConvertError("Already well compressed, so no smaller copy was made")
+        }
+        return out
     }
 
     // MARK: - What can this become?
@@ -99,6 +176,10 @@ enum Converter {
     /// Writes a new file (or folder) next to `src`. Never touches `src`.
     static func convert(_ src: URL, to target: String) throws -> URL {
         let e = ext(src)
+        if isTool(target) {
+            guard canUseTools(src) else { throw ConvertError("Compress and Resize work on photos and videos") }
+            return imageIn.contains(e) ? try imageTool(src, target) : try videoTool(src, target)
+        }
         guard targets(forExt: e).contains(target) else {
             throw ConvertError("Can't convert .\(e) to \(label(target))")
         }
@@ -122,8 +203,8 @@ enum Converter {
 
     static func baseName(_ src: URL) -> String { src.deletingPathExtension().lastPathComponent }
 
-    static func output(for src: URL, ext: String) -> URL {
-        uniqueURL(in: src.deletingLastPathComponent(), base: baseName(src), ext: ext)
+    static func output(for src: URL, suffix: String = "", ext: String) -> URL {
+        uniqueURL(in: src.deletingLastPathComponent(), base: baseName(src) + suffix, ext: ext)
     }
 
     /// Creates "<name> pages" next to `src` and fills it; removes it again if `fill` throws.
@@ -141,8 +222,13 @@ enum Converter {
     // MARK: - Images
 
     static func convertImage(_ src: URL, to target: String) throws -> URL {
-        let image = try loadImage(src)
         let out = output(for: src, ext: target)
+        try save(try loadImage(src), to: out, ext: target)
+        return out
+    }
+
+    /// Writes `image` in any image output format; `quality` applies to lossy formats.
+    static func save(_ image: CGImage, to out: URL, ext target: String, quality: Double = 0.9) throws {
         switch target {
         case "pdf":
             var box = CGRect(x: 0, y: 0, width: image.width, height: image.height)
@@ -152,7 +238,7 @@ enum Converter {
             ctx.endPDFPage()
             ctx.closePDF()
         case "jpg":
-            try write(try flattened(image), to: out, ext: "jpg")
+            try write(try flattened(image), to: out, ext: "jpg", quality: quality)
         case "webp", "avif":
             // Go through a temp PNG so anything ImageIO reads (HEIC etc.) works as ffmpeg input.
             let png = tempURL("png")
@@ -160,18 +246,18 @@ enum Converter {
             // shortcut: AVIF is flattened onto white; ffmpeg's AV1 encoders need a second stream for alpha.
             try write(target == "avif" ? try flattened(image) : image, to: png, ext: "png")
             let codec: [String]
+            let crf = String(Int((1 - quality) * 50 + 18)) // quality 0.9 → 23, 0.4 → 48
             if target == "webp" {
-                codec = ["-c:v", "libwebp", "-quality", "90"]
+                codec = ["-c:v", "libwebp", "-quality", String(Int(quality * 100))]
             } else if encoders.contains("libaom-av1") {
-                codec = ["-c:v", "libaom-av1", "-still-picture", "1", "-crf", "28", "-cpu-used", "6", "-pix_fmt", "yuv420p"]
+                codec = ["-c:v", "libaom-av1", "-still-picture", "1", "-crf", crf, "-cpu-used", "6", "-pix_fmt", "yuv420p"]
             } else {
-                codec = ["-c:v", "libsvtav1", "-crf", "28", "-pix_fmt", "yuv420p"]
+                codec = ["-c:v", "libsvtav1", "-crf", crf, "-pix_fmt", "yuv420p"]
             }
             try ffmpeg(["-i", png.path] + codec, out)
         default:
-            try write(image, to: out, ext: target)
+            try write(image, to: out, ext: target, quality: quality)
         }
-        return out
     }
 
     static func loadImage(_ src: URL) throws -> CGImage {
@@ -216,12 +302,12 @@ enum Converter {
         return ctx.makeImage()!
     }
 
-    static func write(_ image: CGImage, to url: URL, ext: String, extra: [CFString: Any] = [:]) throws {
+    static func write(_ image: CGImage, to url: URL, ext: String, quality: Double = 0.9, extra: [CFString: Any] = [:]) throws {
         guard let type = UTType(filenameExtension: ext)?.identifier,
               let dest = CGImageDestinationCreateWithURL(url as CFURL, type as CFString, 1, nil)
         else { throw ConvertError("This Mac can't write \(label(ext))") }
         var props = extra
-        if ext == "jpg" || ext == "heic" { props[kCGImageDestinationLossyCompressionQuality] = 0.9 }
+        if ext == "jpg" || ext == "heic" { props[kCGImageDestinationLossyCompressionQuality] = quality }
         CGImageDestinationAddImage(dest, image, props as CFDictionary)
         guard CGImageDestinationFinalize(dest) else {
             try? FileManager.default.removeItem(at: url)
@@ -309,19 +395,27 @@ enum Converter {
         } else if target == "gif" {
             // One filtergraph, two passes: build a palette from the clip, then map frames onto it.
             args += ["-an", "-vf", "fps=15,scale='min(720,iw)':-2:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse"]
-        } else if target == "webm" {
-            args += ["-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0", "-row-mt", "1",
-                     "-c:a", "libopus", "-b:a", "128k"]
-        } else { // mp4, mov, mkv
-            args += ["-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-pix_fmt", "yuv420p"]
-            args += h264 == "libx264" ? ["-c:v", "libx264", "-crf", "20", "-preset", "medium"]
-                                      : ["-c:v", "h264_videotoolbox", "-q:v", "65"]
-            args += ["-c:a", "aac", "-b:a", "192k"]
-            if target != "mkv" { args += ["-movflags", "+faststart"] }
+        } else { // mp4, mov, mkv, webm
+            args += videoArgs(target, filter: "scale=trunc(iw/2)*2:trunc(ih/2)*2", crf: 20)
         }
         let out = output(for: src, ext: target)
         try ffmpeg(args, out)
         return out
+    }
+
+    /// Video + audio encoding for a container. `crf` is on the H.264 scale (lower = better); VP9 gets crf + 12.
+    static func videoArgs(_ container: String, filter: String, crf: Int) -> [String] {
+        var args = ["-map", "0:v:0", "-map", "0:a:0?", "-vf", filter]
+        if container == "webm" {
+            return args + ["-c:v", "libvpx-vp9", "-crf", String(crf + 12), "-b:v", "0", "-row-mt", "1",
+                           "-c:a", "libopus", "-b:a", "128k"]
+        }
+        args += ["-pix_fmt", "yuv420p"]
+        args += h264 == "libx264" ? ["-c:v", "libx264", "-crf", String(crf), "-preset", "medium"]
+                                  : ["-c:v", "h264_videotoolbox", "-q:v", String(Int(100 - Double(crf) * 1.5))]
+        args += ["-c:a", "aac", "-b:a", "192k"]
+        if container != "mkv" { args += ["-movflags", "+faststart"] }
+        return args
     }
 
     /// Runs ffmpeg writing to `out`; deletes a half-written `out` on failure.
