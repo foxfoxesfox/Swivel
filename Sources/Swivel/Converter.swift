@@ -1,0 +1,357 @@
+import Foundation
+import CoreGraphics
+import ImageIO
+import PDFKit
+import UniformTypeIdentifiers
+
+struct ConvertError: LocalizedError {
+    let message: String
+    init(_ message: String) { self.message = message }
+    var errorDescription: String? { message }
+}
+
+/// The conversion engine. No UI here: the app and the `--convert` CLI both call `convertAll`.
+/// A "target" is an output extension ("jpg", "mp3"…) or an action ("split", "merge").
+enum Converter {
+    static let imageIn: Set = ["jpg", "png", "heic", "tiff", "bmp", "gif", "webp", "avif"]
+    static let audioIn: Set = ["mp3", "m4a", "wav", "flac", "ogg", "opus", "aiff"]
+    static let videoIn: Set = ["mp4", "mov", "mkv", "webm"]
+
+    /// ffmpeg encoder used for each audio output (also video -> mp3).
+    static let audioCodec = ["mp3": "libmp3lame", "m4a": "aac", "wav": "pcm_s16le", "flac": "flac",
+                             "ogg": "libvorbis", "opus": "libopus", "aiff": "pcm_s16be"]
+    static let audioQuality = ["mp3": ["-q:a", "2"], "m4a": ["-b:a", "256k"], "ogg": ["-q:a", "5"], "opus": ["-b:a", "160k"]]
+
+    // GUI apps don't get the shell PATH, so look where Homebrew installs.
+    static let ffmpegPath = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]
+        .first { FileManager.default.isExecutableFile(atPath: $0) }
+
+    static let encoders: Set<String> = {
+        guard let ff = ffmpegPath, let out = try? run(ff, ["-hide_banner", "-encoders"]) else { return [] }
+        // Lines look like " V....D libx264   libx264 H.264 ..."
+        return Set(out.split(separator: "\n").compactMap { line in
+            let cols = line.split(separator: " ")
+            return cols.count >= 2 && cols[0].count == 6 ? String(cols[1]) : nil
+        })
+    }()
+
+    static var h264: String? {
+        encoders.contains("libx264") ? "libx264" : encoders.contains("h264_videotoolbox") ? "h264_videotoolbox" : nil
+    }
+
+    static func ext(_ url: URL) -> String {
+        let e = url.pathExtension.lowercased()
+        return ["jpeg": "jpg", "tif": "tiff", "heif": "heic", "aif": "aiff"][e] ?? e
+    }
+
+    static func label(_ target: String) -> String {
+        target == "split" || target == "merge" ? target.capitalized : target.uppercased()
+    }
+
+    // MARK: - What can this become?
+
+    static func targets(forExt e: String) -> [String] {
+        let has = encoders.contains
+        var list: [String] = []
+        if imageIn.contains(e) {
+            list = ["jpg", "png", "heic", "tiff", "bmp", "gif", "pdf"]
+            if has("libwebp") { list.append("webp") }
+            if has("libaom-av1") || has("libsvtav1") { list.append("avif") }
+        } else if audioIn.contains(e) {
+            list = ["mp3", "m4a", "wav", "flac", "ogg", "opus", "aiff"].filter { has(audioCodec[$0]!) }
+        } else if videoIn.contains(e) {
+            if h264 != nil && has("aac") { list += ["mp4", "mov", "mkv"] }
+            if has("libvpx-vp9") && has("libopus") { list.append("webm") }
+            if has("gif") { list.append("gif") }
+            if has("libmp3lame") { list.append("mp3") }
+        } else if e == "pdf" {
+            list = ["png", "jpg", "txt", "split"]
+        }
+        return list.filter { $0 != e }
+    }
+
+    /// Targets valid for every dragged file, plus Merge for 2+ PDFs.
+    static func targets(for urls: [URL]) -> [String] {
+        guard let first = urls.first else { return [] }
+        var result = targets(forExt: ext(first))
+        for url in urls.dropFirst() {
+            let other = Set(targets(forExt: ext(url)))
+            result = result.filter(other.contains)
+        }
+        if urls.count > 1 && urls.allSatisfy({ ext($0) == "pdf" }) { result.append("merge") }
+        return result
+    }
+
+    // MARK: - Convert
+
+    static func convertAll(_ urls: [URL], to target: String) -> (outputs: [URL], errors: [String]) {
+        if target == "merge" {
+            do { return ([try merge(urls)], []) } catch { return ([], [error.localizedDescription]) }
+        }
+        var outputs: [URL] = [], errors: [String] = []
+        for url in urls {
+            do { outputs.append(try convert(url, to: target)) }
+            catch { errors.append("\(url.lastPathComponent): \(error.localizedDescription)") }
+        }
+        return (outputs, errors)
+    }
+
+    /// Writes a new file (or folder) next to `src`. Never touches `src`.
+    static func convert(_ src: URL, to target: String) throws -> URL {
+        let e = ext(src)
+        guard targets(forExt: e).contains(target) else {
+            throw ConvertError("Can't convert .\(e) to \(label(target))")
+        }
+        if e == "pdf" { return try convertPDF(src, to: target) }
+        if imageIn.contains(e) { return try convertImage(src, to: target) }
+        return try convertMedia(src, to: target)
+    }
+
+    // MARK: - Naming
+
+    /// "photo.jpg", then "photo 2.jpg", "photo 3.jpg"… `ext == nil` means a folder.
+    static func uniqueURL(in dir: URL, base: String, ext: String?) -> URL {
+        for n in 1... {
+            let name = n == 1 ? base : "\(base) \(n)"
+            let url = ext.map { dir.appendingPathComponent(name).appendingPathExtension($0) }
+                ?? dir.appendingPathComponent(name, isDirectory: true)
+            if !FileManager.default.fileExists(atPath: url.path) { return url }
+        }
+        fatalError("unreachable")
+    }
+
+    static func baseName(_ src: URL) -> String { src.deletingPathExtension().lastPathComponent }
+
+    static func output(for src: URL, ext: String) -> URL {
+        uniqueURL(in: src.deletingLastPathComponent(), base: baseName(src), ext: ext)
+    }
+
+    /// Creates "<name> pages" next to `src` and fills it; removes it again if `fill` throws.
+    static func pagesFolder(for src: URL, fill: (URL) throws -> Void) throws -> URL {
+        let dir = uniqueURL(in: src.deletingLastPathComponent(), base: baseName(src) + " pages", ext: nil)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false)
+        do { try fill(dir) } catch { try? FileManager.default.removeItem(at: dir); throw error }
+        return dir
+    }
+
+    static func tempURL(_ ext: String) -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("swivel-\(UUID().uuidString).\(ext)")
+    }
+
+    // MARK: - Images
+
+    static func convertImage(_ src: URL, to target: String) throws -> URL {
+        let image = try loadImage(src)
+        let out = output(for: src, ext: target)
+        switch target {
+        case "pdf":
+            var box = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+            guard let ctx = CGContext(out as CFURL, mediaBox: &box, nil) else { throw ConvertError("Can't create PDF") }
+            ctx.beginPDFPage(nil)
+            ctx.draw(image, in: box)
+            ctx.endPDFPage()
+            ctx.closePDF()
+        case "jpg":
+            try write(try flattened(image), to: out, ext: "jpg")
+        case "webp", "avif":
+            // Go through a temp PNG so anything ImageIO reads (HEIC etc.) works as ffmpeg input.
+            let png = tempURL("png")
+            defer { try? FileManager.default.removeItem(at: png) }
+            // shortcut: AVIF is flattened onto white; ffmpeg's AV1 encoders need a second stream for alpha.
+            try write(target == "avif" ? try flattened(image) : image, to: png, ext: "png")
+            let codec: [String]
+            if target == "webp" {
+                codec = ["-c:v", "libwebp", "-quality", "90"]
+            } else if encoders.contains("libaom-av1") {
+                codec = ["-c:v", "libaom-av1", "-still-picture", "1", "-crf", "28", "-cpu-used", "6", "-pix_fmt", "yuv420p"]
+            } else {
+                codec = ["-c:v", "libsvtav1", "-crf", "28", "-pix_fmt", "yuv420p"]
+            }
+            try ffmpeg(["-i", png.path] + codec, out)
+        default:
+            try write(image, to: out, ext: target)
+        }
+        return out
+    }
+
+    static func loadImage(_ src: URL) throws -> CGImage {
+        if let source = CGImageSourceCreateWithURL(src as CFURL, nil), let image = orientedImage(source) {
+            return image
+        }
+        // ImageIO couldn't decode it (some WebP/AVIF variants): let ffmpeg make a PNG first.
+        guard let ff = ffmpegPath else { throw ConvertError("Can't read this image") }
+        let png = tempURL("png")
+        defer { try? FileManager.default.removeItem(at: png) }
+        try run(ff, ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", src.path, "-frames:v", "1", png.path])
+        guard let source = CGImageSourceCreateWithURL(png as CFURL, nil), let image = orientedImage(source) else {
+            throw ConvertError("Can't read this image")
+        }
+        return image
+    }
+
+    /// First frame with EXIF orientation baked in (a full-size "thumbnail" applies the transform).
+    static func orientedImage(_ source: CGImageSource) -> CGImage? {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? Int,
+              let h = props[kCGImagePropertyPixelHeight] as? Int else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(w, h),
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    }
+
+    /// Draws onto white, dropping alpha (for JPG).
+    static func flattened(_ image: CGImage) throws -> CGImage {
+        let space = image.colorSpace.flatMap { $0.model == .rgb ? $0 : nil } ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        guard let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { throw ConvertError("Image too large") }
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.fill(rect)
+        ctx.draw(image, in: rect)
+        return ctx.makeImage()!
+    }
+
+    static func write(_ image: CGImage, to url: URL, ext: String, extra: [CFString: Any] = [:]) throws {
+        guard let type = UTType(filenameExtension: ext)?.identifier,
+              let dest = CGImageDestinationCreateWithURL(url as CFURL, type as CFString, 1, nil)
+        else { throw ConvertError("This Mac can't write \(label(ext))") }
+        var props = extra
+        if ext == "jpg" || ext == "heic" { props[kCGImageDestinationLossyCompressionQuality] = 0.9 }
+        CGImageDestinationAddImage(dest, image, props as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else {
+            try? FileManager.default.removeItem(at: url)
+            throw ConvertError("Failed to write \(label(ext))")
+        }
+    }
+
+    // MARK: - PDF
+
+    static func convertPDF(_ src: URL, to target: String) throws -> URL {
+        guard let doc = PDFDocument(url: src) else { throw ConvertError("Can't open PDF") }
+        guard !doc.isLocked else { throw ConvertError("PDF is password-protected") }
+        let base = baseName(src)
+        switch target {
+        case "txt":
+            let text = doc.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !text.isEmpty else { throw ConvertError("No text found (scanned PDF?)") }
+            let out = output(for: src, ext: "txt")
+            try text.write(to: out, atomically: true, encoding: .utf8)
+            return out
+        case "split":
+            return try pagesFolder(for: src) { dir in
+                for i in 0..<doc.pageCount {
+                    let single = PDFDocument()
+                    single.insert(doc.page(at: i)!.copy() as! PDFPage, at: 0)
+                    guard single.write(to: dir.appendingPathComponent("\(base) page \(i + 1).pdf")) else {
+                        throw ConvertError("Failed to write page \(i + 1)")
+                    }
+                }
+            }
+        default: // png, jpg
+            guard let cg = CGPDFDocument(src as CFURL), cg.numberOfPages > 0 else { throw ConvertError("Can't open PDF") }
+            if cg.numberOfPages == 1 {
+                let out = output(for: src, ext: target)
+                try render(cg.page(at: 1)!, to: out, ext: target)
+                return out
+            }
+            return try pagesFolder(for: src) { dir in
+                for i in 1...cg.numberOfPages {
+                    try render(cg.page(at: i)!, to: dir.appendingPathComponent("\(base) page \(i).\(target)"), ext: target)
+                }
+            }
+        }
+    }
+
+    /// Renders a page at 300 DPI on white, honouring the page's rotation.
+    static func render(_ page: CGPDFPage, to url: URL, ext: String) throws {
+        let dpi: CGFloat = 300, scale = dpi / 72
+        let box = page.getBoxRect(.cropBox)
+        let size = page.rotationAngle % 180 == 0 ? box.size : CGSize(width: box.height, height: box.width)
+        let w = Int((size.width * scale).rounded()), h = Int((size.height * scale).rounded())
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { throw ConvertError("Page too large to render") }
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.scaleBy(x: scale, y: scale)
+        // getDrawingTransform only scales down, so scale first and fit into the page's point size.
+        ctx.concatenate(page.getDrawingTransform(.cropBox, rect: CGRect(origin: .zero, size: size), rotate: 0, preserveAspectRatio: true))
+        ctx.drawPDFPage(page)
+        try write(ctx.makeImage()!, to: url, ext: ext, extra: [kCGImagePropertyDPIWidth: dpi, kCGImagePropertyDPIHeight: dpi])
+    }
+
+    /// Joins PDFs in Finder name order into "<first> merged.pdf".
+    static func merge(_ urls: [URL]) throws -> URL {
+        let sorted = urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        let merged = PDFDocument()
+        for url in sorted {
+            guard let doc = PDFDocument(url: url) else { throw ConvertError("Can't open \(url.lastPathComponent)") }
+            guard !doc.isLocked else { throw ConvertError("\(url.lastPathComponent) is password-protected") }
+            for i in 0..<doc.pageCount { merged.insert(doc.page(at: i)!.copy() as! PDFPage, at: merged.pageCount) }
+        }
+        let out = uniqueURL(in: sorted[0].deletingLastPathComponent(), base: baseName(sorted[0]) + " merged", ext: "pdf")
+        guard merged.write(to: out) else { throw ConvertError("Failed to write merged PDF") }
+        return out
+    }
+
+    // MARK: - Audio / video (ffmpeg)
+
+    static func convertMedia(_ src: URL, to target: String) throws -> URL {
+        var args = ["-i", src.path]
+        if let codec = audioCodec[target] {
+            args += ["-map", "0:a:0", "-map_metadata", "0", "-c:a", codec] + (audioQuality[target] ?? [])
+        } else if target == "gif" {
+            // One filtergraph, two passes: build a palette from the clip, then map frames onto it.
+            args += ["-an", "-vf", "fps=15,scale='min(720,iw)':-2:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse"]
+        } else if target == "webm" {
+            args += ["-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0", "-row-mt", "1",
+                     "-c:a", "libopus", "-b:a", "128k"]
+        } else { // mp4, mov, mkv
+            args += ["-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-pix_fmt", "yuv420p"]
+            args += h264 == "libx264" ? ["-c:v", "libx264", "-crf", "20", "-preset", "medium"]
+                                      : ["-c:v", "h264_videotoolbox", "-q:v", "65"]
+            args += ["-c:a", "aac", "-b:a", "192k"]
+            if target != "mkv" { args += ["-movflags", "+faststart"] }
+        }
+        let out = output(for: src, ext: target)
+        try ffmpeg(args, out)
+        return out
+    }
+
+    /// Runs ffmpeg writing to `out`; deletes a half-written `out` on failure.
+    static func ffmpeg(_ args: [String], _ out: URL) throws {
+        guard let ff = ffmpegPath else { throw ConvertError("ffmpeg not found. Install it with: brew install ffmpeg") }
+        do {
+            try run(ff, ["-nostdin", "-hide_banner", "-loglevel", "error", "-n"] + args + [out.path])
+        } catch {
+            try? FileManager.default.removeItem(at: out)
+            throw error
+        }
+    }
+
+    /// Runs a tool, returns stdout+stderr; throws the last lines of output on a non-zero exit.
+    @discardableResult
+    static func run(_ exe: String, _ args: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: exe)
+        process.arguments = args
+        let pipe = Pipe() // one pipe for both streams, so a chatty stderr can't deadlock us
+        process.standardOutput = pipe
+        process.standardError = pipe
+        process.standardInput = FileHandle.nullDevice
+        try process.run()
+        let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let tail = text.split(separator: "\n").suffix(3).joined(separator: "\n")
+            throw ConvertError(tail.isEmpty ? "\(URL(fileURLWithPath: exe).lastPathComponent) exited with \(process.terminationStatus)" : tail)
+        }
+        return text
+    }
+}
