@@ -6,7 +6,7 @@ macOS 13+, Apple silicon. Everything runs on your Mac; nothing is uploaded.
 
 ## Just want the app?
 
-Download [`dist/Swivel.dmg`](dist/Swivel.dmg) (or clone this repo and open that file), double-click it, and drag Swivel into Applications. The first launch needs one extra step; see [Share with a friend](#share-with-a-friend).
+**[Download Swivel.dmg](https://github.com/foxfoxesfox/Swivel/raw/main/dist/Swivel.dmg)** (or clone this repo and open `dist/Swivel.dmg`), double-click it, and drag Swivel into Applications. The first launch needs one extra step; see [Share with a friend](#share-with-a-friend).
 
 ## Build
 
