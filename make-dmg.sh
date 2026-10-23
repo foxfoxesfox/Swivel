@@ -48,4 +48,21 @@ mkdir -p dist
 rm -f dist/Swivel.dmg
 hdiutil convert -quiet "$WORK/rw.dmg" -format UDZO -imagekey zlib-level=9 -o dist/Swivel.dmg
 rm -rf "$WORK"
-echo "Built dist/Swivel.dmg (version $VERSION)"
+# Update feed the app reads: version, download link, checksum, and this version's CHANGELOG section.
+REPO=$(git remote get-url origin 2>/dev/null | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')
+REPO=${REPO:-foxfoxesfox/Swivel}
+SHA=$(shasum -a 256 dist/Swivel.dmg | cut -d' ' -f1)
+python3 - "$VERSION" "$SHA" "https://github.com/$REPO/raw/main/dist/Swivel.dmg" <<'PY'
+import json, re, sys
+version, sha, url = sys.argv[1:4]
+try:
+    text = open("CHANGELOG.md").read()
+    m = re.search(r"^## \[" + re.escape(version) + r"\][^\n]*\n(.*?)(?=^## \[|^\[[^\]]+\]: |\Z)", text, re.S | re.M)
+    notes = m.group(1).strip() if m else ""
+except FileNotFoundError:
+    notes = ""
+if not notes:
+    print(f"warning: CHANGELOG.md has no section for {version}; the update window will show no notes")
+json.dump({"version": version, "url": url, "sha256": sha, "notes": notes}, open("dist/latest.json", "w"), indent=2)
+PY
+echo "Built dist/Swivel.dmg and dist/latest.json (version $VERSION)"

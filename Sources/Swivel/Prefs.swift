@@ -41,19 +41,21 @@ final class Prefs: ObservableObject {
     }
     @Published var actionsDrag: Bool { didSet { d.set(actionsDrag, forKey: "actionsDrag") } }
     @Published var actionsKey: TriggerKey { didSet { d.set(actionsKey.rawValue, forKey: "actionsKey") } }
+    @Published var autoUpdate: Bool { didSet { d.set(autoUpdate, forKey: "autoUpdate") } }
     @Published var actionsFinder: Bool {
         didSet { d.set(actionsFinder, forKey: "actionsFinder"); FinderMenu.set(.actions, enabled: actionsFinder) }
     }
 
     private init() {
         d.register(defaults: ["convertDrag": true, "convertKey": "shift", "convertFinder": true,
-                              "actionsDrag": true, "actionsKey": "control", "actionsFinder": true])
+                              "actionsDrag": true, "actionsKey": "control", "actionsFinder": true, "autoUpdate": true])
         convertDrag = d.bool(forKey: "convertDrag")
         convertKey = TriggerKey(rawValue: d.string(forKey: "convertKey") ?? "") ?? .shift
         convertFinder = d.bool(forKey: "convertFinder")
         actionsDrag = d.bool(forKey: "actionsDrag")
         actionsKey = TriggerKey(rawValue: d.string(forKey: "actionsKey") ?? "") ?? .control
         actionsFinder = d.bool(forKey: "actionsFinder")
+        autoUpdate = d.bool(forKey: "autoUpdate")
         if actionsKey == convertKey { actionsKey = TriggerKey.allCases.first { $0 != convertKey }! }
     }
 

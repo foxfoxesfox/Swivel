@@ -1,0 +1,6 @@
+{
+  "version": "2.2",
+  "url": "https://github.com/foxfoxesfox/Swivel/raw/main/dist/Swivel.dmg",
+  "sha256": "9e57827a513d7a2da99c148bce2d2a42cd19c31d573a80d31f10ebdc6295effa",
+  "notes": "Swivel can now update itself.\n\n### Added\n- **In-app updates.** Once a day Swivel checks this GitHub repository for a newer version. When there is one, you get a notification and an **Update to Swivel x.y\u2026** item in the menu bar. The update window shows what's new; **Install and Relaunch** downloads the update, checks it (checksum, app identity, version and code signature), swaps it in and reopens Swivel. Your settings are kept, and the previous version is restored if anything goes wrong.\n- **Check for Updates\u2026** in the menu bar, and a **Check for updates automatically** switch (with Check Now) in Settings and the welcome tour.\n- After updating, a notification links to this changelog.\n\n### Note\n- Copies of 2.1 and earlier can't update themselves. Download 2.2 once, and later versions arrive in the app."
+}

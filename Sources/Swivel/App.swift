@@ -19,6 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var thumbnails: [String: NSImage] = [:] // small previews for the Recent menu
     var settingsWindow: NSWindow?
     var welcomeWindow: NSWindow?
+    var updateWindow: NSWindow?
+    let updater = Updater.shared
 
     // Drag polling state (no Accessibility permission needed).
     var lastDragChange = NSPasteboard(name: .drag).changeCount
@@ -60,6 +62,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         RunLoop.main.add(timer, forMode: .common)
 
         if !UserDefaults.standard.bool(forKey: "didOnboard") { showWelcome() }
+
+        if let from = UserDefaults.standard.string(forKey: "updatedFrom") {
+            UserDefaults.standard.removeObject(forKey: "updatedFrom")
+            notify("Swivel updated to \(Updater.currentVersion)", "You were on \(from). Click to see what's new.", opens: "changelog")
+        }
+        // Automatic update check: shortly after launch, then every few hours, at most once a day.
+        let updates = Timer(timeInterval: 6 * 3600, repeats: true) { [weak self] _ in self?.autoCheckForUpdates() }
+        RunLoop.main.add(updates, forMode: .common)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in self?.autoCheckForUpdates() }
+    }
+
+    // MARK: - Updates
+
+    func autoCheckForUpdates() {
+        let last = UserDefaults.standard.object(forKey: "lastUpdateCheck") as? Date ?? .distantPast
+        guard prefs.autoUpdate, Date().timeIntervalSince(last) > 20 * 3600, updateWindow?.isVisible != true else { return }
+        updater.check { [weak self] release in
+            guard let release, UserDefaults.standard.string(forKey: "notifiedVersion") != release.version else { return }
+            UserDefaults.standard.set(release.version, forKey: "notifiedVersion") // one notification per version
+            self?.notify("Swivel \(release.version) is available", "Click to see what's new and update.", opens: "update")
+        }
+    }
+
+    /// The update window; `check` asks GitHub first (the menu's "Check for Updates…").
+    @objc func checkForUpdatesNow() { showUpdates(check: true) }
+
+    func showUpdates(check: Bool) {
+        if check { updater.check() }
+        present(&updateWindow, title: "Software Update", UpdateView(onClose: { [weak self] in self?.updateWindow?.close() }))
     }
 
     // MARK: - Drag detection
@@ -196,12 +227,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
 
-    /// `opensSettings`: clicking opens Settings. `outputs`: adds Show in Finder / Undo for the files Swivel made.
-    func notify(_ title: String, _ body: String, opensSettings: Bool = false, outputs: [URL] = []) {
+    /// `opens`: what a click opens ("settings", "update", "changelog"). `outputs`: adds Show in Finder / Undo for the files Swivel made.
+    func notify(_ title: String, _ body: String, opensSettings: Bool = false, opens: String? = nil, outputs: [URL] = []) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        if opensSettings { content.userInfo = ["open": "settings"] }
+        if let target = opens ?? (opensSettings ? "settings" : nil) { content.userInfo = ["open": target] }
         if !outputs.isEmpty {
             content.categoryIdentifier = "result"
             content.userInfo = ["outputs": outputs.map(\.path)]
@@ -223,6 +254,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         DispatchQueue.main.async {
             if action == "undo" { self.undo(outputs) }
             else if info["open"] as? String == "settings" { self.showSettings() }
+            else if info["open"] as? String == "update" { self.showUpdates(check: self.updater.release == nil) }
+            else if info["open"] as? String == "changelog", let page = Updater.homepage {
+                NSWorkspace.shared.open(page.appendingPathComponent("blob/main/CHANGELOG.md"))
+            }
             else if !outputs.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(outputs) }
             else { self.showLastOutput() }
         }
@@ -304,7 +339,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             _ = add(FFmpegSetup.brewPath != nil ? "Install ffmpeg…" : "Install Homebrew and ffmpeg…", #selector(installFFmpeg))
         }
         menu.addItem(.separator())
+        if let release = updater.release {
+            let item = add("Update to Swivel \(release.version)…", #selector(showUpdateWindow))
+            item.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
+        }
         _ = add("How to Use & Settings…", #selector(showSettings), key: ",")
+        _ = add("Check for Updates…", #selector(checkForUpdatesNow))
         add("Launch at Login", #selector(toggleLaunchAtLogin)).state = SMAppService.mainApp.status == .enabled ? .on : .off
         _ = add("Show Last Output in Finder", lastOutput == nil ? nil : #selector(showLastOutput))
         let recents = Recents.all
@@ -349,7 +389,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     /// Back to menu-bar-only once the last Swivel window closes.
     func windowWillClose(_ notification: Notification) {
         let closing = notification.object as? NSWindow
-        let others = [settingsWindow, welcomeWindow].contains { $0 != nil && $0 !== closing && $0!.isVisible }
+        let others = [settingsWindow, welcomeWindow, updateWindow].contains { $0 != nil && $0 !== closing && $0!.isVisible }
         if !others { NSApp.setActivationPolicy(.accessory) }
     }
 
@@ -407,6 +447,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc func clearRecents() { Recents.clear() }
+
+    @objc func showUpdateWindow() { showUpdates(check: false) }
 
     @objc func quit() { NSApp.terminate(nil) }
 }

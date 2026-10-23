@@ -6,6 +6,10 @@ cd "$(dirname "$0")"
 swift build -c release --arch arm64
 BIN="$(swift build -c release --arch arm64 --show-bin-path)/Swivel"
 
+# GitHub repo the app checks for updates (from this checkout's "origin" remote).
+REPO=$(git remote get-url origin 2>/dev/null | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')
+REPO=${REPO:-foxfoxesfox/Swivel}
+
 APP=build.noindex/Swivel.app  # .noindex keeps Spotlight from listing a second Swivel
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -29,9 +33,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>Swivel</string>
     <key>CFBundleDisplayName</key><string>Swivel</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>SwivelUpdateFeed</key><string>https://raw.githubusercontent.com/$REPO/main/dist/latest.json</string>
+    <key>SwivelHomepage</key><string>https://github.com/$REPO</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.1</string>
-    <key>CFBundleVersion</key><string>3</string>
+    <key>CFBundleShortVersionString</key><string>2.2</string>
+    <key>CFBundleVersion</key><string>4</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>

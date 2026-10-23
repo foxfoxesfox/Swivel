@@ -307,8 +307,18 @@ private struct TriggerRows: View {
 
 struct GeneralRows: View {
     @ObservedObject var login: LoginItem
+    @ObservedObject var prefs = Prefs.shared
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Toggle("Check for updates automatically", isOn: $prefs.autoUpdate)
+                Spacer()
+                Button("Check Now") { (NSApp.delegate as? AppDelegate)?.showUpdates(check: true) }
+            }
+            Text("Once a day Swivel asks GitHub if there's a newer version, then lets you install it with one click. Nothing about you or your files is sent.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
         Toggle("Launch at Login", isOn: Binding(
             get: { login.status == .enabled || login.status == .requiresApproval },
             set: login.set))
@@ -418,5 +428,107 @@ struct Flow: View {
 
     private func caption(_ step: Step) -> String {
         switch step { case .icon(_, let c), .key(_, let c): return c }
+    }
+}
+
+// MARK: - Updates
+
+struct UpdateView: View {
+    @ObservedObject var updater = Updater.shared
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 56, height: 56).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.title3.bold())
+                    Text(subtitle).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if let release = updater.release, !release.notes.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("What's new").font(.headline)
+                    ScrollView {
+                        Text(notes(release.notes)).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                    }
+                    .frame(height: 200)
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor)))
+                }
+            }
+            status
+            HStack {
+                if case .failed = updater.state, let page = Updater.homepage {
+                    Link("Open GitHub page", destination: page)
+                }
+                Spacer()
+                buttons
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
+    }
+
+    private var title: String {
+        switch updater.state {
+        case .checking: return "Checking for updates…"
+        case .upToDate: return "Swivel is up to date"
+        case .failed where updater.release == nil: return "Couldn't check for updates"
+        default: return updater.release.map { "Swivel \($0.version) is available" } ?? "Updates"
+        }
+    }
+
+    private var subtitle: String {
+        switch updater.state {
+        case .upToDate: return "You have the latest version, \(Updater.currentVersion)."
+        case .checking: return "Asking GitHub for the latest version."
+        default:
+            if updater.release == nil { return "Check your internet connection and try again." }
+            return "You have \(Updater.currentVersion). Updating takes a few seconds and keeps your settings."
+        }
+    }
+
+    @ViewBuilder private var status: some View {
+        switch updater.state {
+        case .downloading(let fraction):
+            ProgressView(value: fraction) { Text("Downloading… \(Int(fraction * 100))%") }
+        case .installing:
+            ProgressView { Text("Installing. Swivel will reopen in a moment.") }
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        default:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder private var buttons: some View {
+        switch updater.state {
+        case .available:
+            Button("Later", action: onClose).keyboardShortcut(.cancelAction)
+            Button("Install and Relaunch") { updater.install() }.keyboardShortcut(.defaultAction)
+        case .failed:
+            Button("Close", action: onClose).keyboardShortcut(.cancelAction)
+            Button("Try Again") { updater.release == nil ? updater.check() : updater.install() }.keyboardShortcut(.defaultAction)
+        case .downloading, .installing, .checking:
+            Button("Close", action: onClose).disabled(updater.state == .installing)
+        default:
+            Button("OK", action: onClose).keyboardShortcut(.defaultAction)
+        }
+    }
+
+    /// CHANGELOG markdown: headings in bold, bullets as •, bold/links inline, line breaks kept.
+    private func notes(_ text: String) -> AttributedString {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+            if line.hasPrefix("### ") { return "**\(line.dropFirst(4))**" }
+            if line.hasPrefix("  - ") { return "    ◦ " + line.dropFirst(4) }
+            if line.hasPrefix("- ") { return "• " + line.dropFirst(2) }
+            return String(line)
+        }
+        let cleaned = lines.joined(separator: "\n")
+        return (try? AttributedString(markdown: cleaned, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(cleaned)
     }
 }

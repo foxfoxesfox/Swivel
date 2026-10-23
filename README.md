@@ -80,6 +80,21 @@ Swivel.app/Contents/MacOS/Swivel --convert photo.png jpg  # convert
 Swivel.app/Contents/MacOS/Swivel --convert photo.png compress-balanced   # also compress-high|small, scale-50, fit-1280
 ```
 
+## Updates
+
+From 2.2 on, Swivel updates itself. Once a day it checks this repository for a newer version (turn this off in Settings). When one is out, you get a notification and an **Update to Swivel x.y…** item in the menu bar. **Install and Relaunch** downloads it, checks it (checksum, app identity, version, code signature), swaps it in and reopens Swivel, keeping your settings. **Check for Updates…** in the menu checks right away. The check is a plain download from GitHub; nothing about you or your files is sent.
+
+Copies of 2.1 and earlier don't have this: download the latest DMG once, and updates arrive in the app after that.
+
+### Publishing an update (for the maintainer)
+
+1. Make your changes and bump the version in `build.sh` (`CFBundleShortVersionString`, e.g. 2.3, and `CFBundleVersion`, e.g. 5).
+2. Add a `## [2.3] - <date>` section at the top of `CHANGELOG.md`. Its text becomes the "What's new" in the update window.
+3. Run `./make-dmg.sh`. It builds `dist/Swivel.dmg` and `dist/latest.json` (version, download link, checksum, notes).
+4. Commit and push both files. Within a day, everyone's Swivel offers the update.
+
+If the version number doesn't go up, nobody is offered anything. Always push the DMG and `latest.json` together.
+
 ## Share with a friend
 
 ```bash

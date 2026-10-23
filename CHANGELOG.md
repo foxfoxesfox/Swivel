@@ -3,6 +3,18 @@
 All notable changes to Swivel. Newest first.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [2.2] - 2026-10-23
+
+Swivel can now update itself.
+
+### Added
+- **In-app updates.** Once a day Swivel checks this GitHub repository for a newer version. When there is one, you get a notification and an **Update to Swivel x.y…** item in the menu bar. The update window shows what's new; **Install and Relaunch** downloads the update, checks it (checksum, app identity, version and code signature), swaps it in and reopens Swivel. Your settings are kept, and the previous version is restored if anything goes wrong.
+- **Check for Updates…** in the menu bar, and a **Check for updates automatically** switch (with Check Now) in Settings and the welcome tour.
+- After updating, a notification links to this changelog.
+
+### Note
+- Copies of 2.1 and earlier can't update themselves. Download 2.2 once, and later versions arrive in the app.
+
 ## [2.1] - 2026-10-23
 
 Polish, progress you can see, and a new way to share.
@@ -66,6 +78,7 @@ First release: an offline file converter in the menu bar.
 - Drag-to-Applications installer (DMG) and an original app icon.
 - Works without the Accessibility permission. Nothing is uploaded; everything runs on your Mac.
 
-[2.1]: https://github.com/foxfoxesfox/Swivel/compare/5d80321...HEAD
+[2.2]: https://github.com/foxfoxesfox/Swivel/compare/f59abb9...HEAD
+[2.1]: https://github.com/foxfoxesfox/Swivel/compare/5d80321...f59abb9
 [2.0]: https://github.com/foxfoxesfox/Swivel/compare/f559c0e...5d80321
 [1.0]: https://github.com/foxfoxesfox/Swivel/commit/f559c0e
