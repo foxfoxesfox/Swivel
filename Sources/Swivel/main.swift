@@ -5,6 +5,7 @@ import AppKit
 //   Swivel --convert <file>... <target>  convert and print the output paths
 let args = Array(CommandLine.arguments.dropFirst())
 if args.first == "--targets" || args.first == "--convert" {
+    _ = NSApplication.shared // documents → PDF lay text out with AppKit
     let isConvert = args[0] == "--convert"
     var files = args.dropFirst().map { URL(fileURLWithPath: $0) }
     let target = isConvert ? files.popLast()?.lastPathComponent.lowercased() : nil

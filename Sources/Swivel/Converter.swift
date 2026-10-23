@@ -1,7 +1,8 @@
-import Foundation
+import AppKit
 import CoreGraphics
 import ImageIO
 import PDFKit
+import Quartz
 import UniformTypeIdentifiers
 
 struct ConvertError: LocalizedError {
@@ -13,17 +14,28 @@ struct ConvertError: LocalizedError {
 /// The conversion engine. No UI here: the app and the `--convert` CLI both call `convertAll`.
 /// A "target" is an output extension ("jpg", "mp3"…) or an action ("split", "merge").
 enum Converter {
-    static let imageIn: Set = ["jpg", "png", "heic", "tiff", "bmp", "gif", "webp", "avif"]
-    static let audioIn: Set = ["mp3", "m4a", "wav", "flac", "ogg", "opus", "aiff"]
-    static let videoIn: Set = ["mp4", "mov", "mkv", "webm"]
+    /// Camera RAW files: read by macOS itself; saved as JPG when a tool keeps "the same format".
+    static let rawIn: Set = ["cr2", "cr3", "nef", "arw", "dng", "raf", "orf", "rw2"]
+    static let imageIn = Set(["jpg", "png", "heic", "tiff", "bmp", "gif", "webp", "avif"]).union(rawIn)
+    static let audioIn: Set = ["mp3", "m4a", "wav", "flac", "ogg", "opus", "aiff", "wma", "aac"]
+    static let videoIn: Set = ["mp4", "mov", "mkv", "webm", "avi", "wmv", "flv", "mpg", "m4v", "3gp", "ts"]
+    static let docIn: Set = ["docx", "doc", "rtf", "odt", "html", "txt"]
+    static let archiveIn: Set = ["zip", "tar", "gz", "tgz", "bz2", "xz"]
+    static let subtitleIn: Set = ["srt", "vtt", "ass"]
+    /// Everything that needs ffmpeg to convert at all.
+    static var needsFFmpeg: Set<String> { audioIn.union(videoIn).union(subtitleIn) }
 
     /// ffmpeg encoder used for each audio output (also video -> mp3).
     static let audioCodec = ["mp3": "libmp3lame", "m4a": "aac", "wav": "pcm_s16le", "flac": "flac",
                              "ogg": "libvorbis", "opus": "libopus", "aiff": "pcm_s16be"]
     static let audioQuality = ["mp3": ["-q:a", "2"], "m4a": ["-b:a", "256k"], "ogg": ["-q:a", "5"], "opus": ["-b:a", "160k"]]
 
-    // GUI apps don't get the shell PATH, so look where Homebrew installs.
-    static let ffmpegPath = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]
+    /// Where Swivel keeps the ffmpeg it downloads itself (FFmpegSetup).
+    static let ownFFmpegDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Swivel/bin")
+
+    // GUI apps don't get the shell PATH: look where Homebrew installs, then Swivel's own copy.
+    static let ffmpegPath = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", ownFFmpegDir.appendingPathComponent("ffmpeg").path]
         .first { FileManager.default.isExecutableFile(atPath: $0) }
 
     static let encoders: Set<String> = {
@@ -41,21 +53,23 @@ enum Converter {
 
     static func ext(_ url: URL) -> String {
         let e = url.pathExtension.lowercased()
-        return ["jpeg": "jpg", "tif": "tiff", "heif": "heic", "aif": "aiff"][e] ?? e
+        return ["jpeg": "jpg", "tif": "tiff", "heif": "heic", "aif": "aiff", "htm": "html", "mpeg": "mpg", "mts": "ts"][e] ?? e
     }
 
     static func label(_ target: String) -> String {
         if target.hasPrefix("compress-") { return "Compress" }
         if target.hasPrefix("send-") { return "Send-ready" }
+        if target == "strip" { return "Remove location" }
+        if target == "combine" { return "One PDF" }
         if isTool(target) { return "Resize" }
-        return target == "split" || target == "merge" ? target.capitalized : target.uppercased()
+        return ["split", "merge", "extract"].contains(target) ? target.capitalized : target.uppercased()
     }
 
     // MARK: - Compress / resize (actions wheel)
 
     /// Tool targets: "compress-high|balanced|small", "scale-<percent>", "fit-<longest side px>".
     static func isTool(_ target: String) -> Bool {
-        target.hasPrefix("compress-") || target.hasPrefix("scale-") || target.hasPrefix("fit-") || target.hasPrefix("send-")
+        target.hasPrefix("compress-") || target.hasPrefix("scale-") || target.hasPrefix("fit-") || target.hasPrefix("send-") || target == "strip"
     }
 
     /// Lossy image quality (0–1) and H.264 CRF for each compress level.
@@ -79,9 +93,44 @@ enum Converter {
             return try keepIfSmaller(out, than: src)
         }
         let resized = try scaled(image, by: try scale(for: target, longest: max(image.width, image.height)))
-        let out = output(for: src, suffix: " resized", ext: e)
-        try save(resized, to: out, ext: e)
+        let outExt = rawIn.contains(e) ? "jpg" : e
+        let out = output(for: src, suffix: " resized", ext: outExt)
+        try save(resized, to: out, ext: outExt)
         return out
+    }
+
+    /// A copy without GPS location. Photos: a lossless copy where macOS can, otherwise re-encoded (which drops all metadata).
+    /// Videos: streams copied as-is, metadata dropped.
+    static func stripLocation(_ src: URL) throws -> URL {
+        let e = ext(src)
+        if videoIn.contains(e) {
+            let out = output(for: src, suffix: " no location", ext: e)
+            try ffmpeg(["-i", src.path, "-map", "0:v", "-map", "0:a?", "-c", "copy", "-map_metadata", "-1"], out)
+            return out
+        }
+        let outExt = rawIn.contains(e) ? "jpg" : e
+        let out = output(for: src, suffix: " no location", ext: outExt)
+        if !rawIn.contains(e), let source = CGImageSourceCreateWithURL(src as CFURL, nil), let type = CGImageSourceGetType(source),
+           let dest = CGImageDestinationCreateWithURL(out as CFURL, type, 1, nil),
+           CGImageDestinationCopyImageSource(dest, source, [kCGImageMetadataShouldExcludeGPS: true] as CFDictionary, nil) {
+            return out
+        }
+        try? FileManager.default.removeItem(at: out)
+        try save(try loadImage(src), to: out, ext: outExt)
+        return out
+    }
+
+    /// Preview's "Reduce File Size" filter; kept only if it actually got smaller.
+    static func compressPDF(_ src: URL) throws -> URL {
+        guard let doc = PDFDocument(url: src), !doc.isLocked else { throw ConvertError("Can't open this PDF (password-protected?)") }
+        guard let filter = QuartzFilter(url: URL(fileURLWithPath: "/System/Library/Filters/Reduce File Size.qfilter")) else {
+            throw ConvertError("This Mac's Reduce File Size filter is missing")
+        }
+        let out = output(for: src, suffix: " compressed", ext: "pdf")
+        guard doc.write(to: out, withOptions: [PDFDocumentWriteOption(rawValue: "QuartzFilter"): filter]) else {
+            throw ConvertError("Failed to write the compressed PDF")
+        }
+        return try keepIfSmaller(out, than: src)
     }
 
     static func scaled(_ image: CGImage, by s: Double) throws -> CGImage {
@@ -200,9 +249,15 @@ enum Converter {
         let has = encoders.contains
         var list: [String] = []
         if imageIn.contains(e) {
-            list = ["jpg", "png", "heic", "tiff", "bmp", "gif", "pdf"]
+            list = ["jpg", "png", "heic", "tiff", "bmp", "gif", "pdf", "ico", "icns"]
             if has("libwebp") { list.append("webp") }
             if has("libaom-av1") || has("libsvtav1") { list.append("avif") }
+        } else if docIn.contains(e) {
+            list = ["pdf", "docx", "rtf", "html", "txt", "odt"]
+        } else if archiveIn.contains(e) {
+            list = ["extract"]
+        } else if subtitleIn.contains(e) {
+            list = ["srt", "vtt", "ass"].filter { has(["srt": "srt", "vtt": "webvtt", "ass": "ass"][$0]!) }
         } else if audioIn.contains(e) {
             list = ["mp3", "m4a", "wav", "flac", "ogg", "opus", "aiff"].filter { has(audioCodec[$0]!) }
         } else if videoIn.contains(e) {
@@ -225,6 +280,7 @@ enum Converter {
             result = result.filter(other.contains)
         }
         if urls.count > 1 && urls.allSatisfy({ ext($0) == "pdf" }) { result.append("merge") }
+        if urls.count > 1 && urls.allSatisfy({ imageIn.contains(ext($0)) }) { result.append("combine") }
         return result
     }
 
@@ -233,8 +289,9 @@ enum Converter {
     static func convertAll(_ urls: [URL], to target: String, job: Job? = nil) -> (outputs: [URL], errors: [String]) {
         Job.current = job
         defer { Job.current = nil }
-        if target == "merge" {
-            do { return ([try merge(urls)], []) } catch { return ([], [error.localizedDescription]) }
+        // These make one file out of all the dragged ones.
+        if let together = ["merge": merge, "combine": combineImages, "zip": zip][target] {
+            do { return ([try together(urls)], []) } catch { return ([], [error.localizedDescription]) }
         }
         var outputs: [URL] = [], errors: [String] = []
         for (i, url) in urls.enumerated() {
@@ -249,8 +306,10 @@ enum Converter {
     /// Writes a new file (or folder) next to `src`. Never touches `src`.
     static func convert(_ src: URL, to target: String) throws -> URL {
         let e = ext(src)
+        if target.hasPrefix("compress-") && e == "pdf" { return try compressPDF(src) }
         if isTool(target) {
             guard canUseTools(src) else { throw ConvertError("Compress and Resize work on photos and videos") }
+            if target == "strip" { return try stripLocation(src) }
             if let mb = Int(target.dropFirst(5)), target.hasPrefix("send-") {
                 return imageIn.contains(e) ? try sendImage(src, mb: mb) : try sendVideo(src, mb: mb)
             }
@@ -261,6 +320,8 @@ enum Converter {
         }
         if e == "pdf" { return try convertPDF(src, to: target) }
         if imageIn.contains(e) { return try convertImage(src, to: target) }
+        if docIn.contains(e) { return try convertDocument(src, to: target) }
+        if archiveIn.contains(e) { return try extract(src) }
         return try convertMedia(src, to: target)
     }
 
@@ -315,6 +376,19 @@ enum Converter {
             ctx.closePDF()
         case "jpg":
             try write(try flattened(image), to: out, ext: "jpg", quality: quality)
+        case "ico":
+            // Icons are square: fit the picture on a transparent square (ICO tops out at 256 px).
+            try write(try squared(image, side: 256), to: out, ext: "ico")
+        case "icns":
+            // ImageIO can't write ICNS, so build the standard iconset (16–1024 px) and pack it like Apple's tools do.
+            let set = tempURL("iconset")
+            defer { try? FileManager.default.removeItem(at: set) }
+            try FileManager.default.createDirectory(at: set, withIntermediateDirectories: true)
+            for size in [16, 32, 128, 256, 512] {
+                try write(try squared(image, side: size), to: set.appendingPathComponent("icon_\(size)x\(size).png"), ext: "png")
+                try write(try squared(image, side: size * 2), to: set.appendingPathComponent("icon_\(size)x\(size)@2x.png"), ext: "png")
+            }
+            try run("/usr/bin/iconutil", ["-c", "icns", set.path, "-o", out.path])
         case "webp", "avif":
             // Go through a temp PNG so anything ImageIO reads (HEIC etc.) works as ffmpeg input.
             let png = tempURL("png")
@@ -449,6 +523,138 @@ enum Converter {
     }
 
     /// Joins PDFs in Finder name order into "<first> merged.pdf".
+    static func squared(_ image: CGImage, side: Int) throws -> CGImage {
+        guard let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { throw ConvertError("Couldn't make the icon") }
+        let s = Double(side) / Double(max(image.width, image.height))
+        let w = Double(image.width) * s, h = Double(image.height) * s
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: (Double(side) - w) / 2, y: (Double(side) - h) / 2, width: w, height: h))
+        return ctx.makeImage()!
+    }
+
+    // MARK: - Documents, archives
+
+    /// Word, RTF, ODT, HTML and text via macOS's own converter (textutil); PDF by laying the text out on pages.
+    static func convertDocument(_ src: URL, to target: String) throws -> URL {
+        let out = output(for: src, ext: target)
+        do {
+            if target == "pdf" { try documentToPDF(src, out) }
+            else { try run("/usr/bin/textutil", ["-convert", target, "-output", out.path, src.path]) }
+        } catch {
+            try? FileManager.default.removeItem(at: out)
+            throw error
+        }
+        guard FileManager.default.fileExists(atPath: out.path) else { throw ConvertError("Couldn't convert this document") }
+        return out
+    }
+
+    /// Lays the document's text out on pages (system paper size, 0.75" margins) and draws them into a PDF.
+    /// Runs on the main thread: HTML import uses WebKit, which requires it.
+    static func documentToPDF(_ src: URL, _ out: URL) throws {
+        func render() throws {
+            let storage = NSTextStorage(attributedString: try NSAttributedString(url: src, options: [:], documentAttributes: nil))
+            let layout = NSLayoutManager()
+            storage.addLayoutManager(layout)
+            var paper = NSPrintInfo.shared.paperSize
+            if paper.width < 100 || paper.height < 100 { paper = NSSize(width: 612, height: 792) }
+            let margin: CGFloat = 54
+            let textSize = NSSize(width: paper.width - 2 * margin, height: paper.height - 2 * margin)
+            var pages: [NSTextContainer] = []
+            repeat { // one text container per page until all text is placed
+                let page = NSTextContainer(size: textSize)
+                layout.addTextContainer(page)
+                pages.append(page)
+                if layout.glyphRange(for: page).length == 0 && pages.count > 1 { break } // nothing fits: stop, don't loop
+            } while NSMaxRange(layout.glyphRange(for: pages.last!)) < layout.numberOfGlyphs && pages.count < 2000
+
+            var box = CGRect(origin: .zero, size: paper)
+            guard let ctx = CGContext(out as CFURL, mediaBox: &box, nil) else { throw ConvertError("Can't create PDF") }
+            for page in pages {
+                ctx.beginPDFPage(nil)
+                ctx.translateBy(x: 0, y: paper.height) // text draws top-down
+                ctx.scaleBy(x: 1, y: -1)
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+                let range = layout.glyphRange(for: page)
+                layout.drawBackground(forGlyphRange: range, at: NSPoint(x: margin, y: margin))
+                layout.drawGlyphs(forGlyphRange: range, at: NSPoint(x: margin, y: margin))
+                NSGraphicsContext.restoreGraphicsState()
+                ctx.endPDFPage()
+            }
+            ctx.closePDF()
+        }
+        if Thread.isMainThread { return try render() }
+        var failure: Error?
+        DispatchQueue.main.sync { do { try render() } catch { failure = error } }
+        if let failure { throw failure }
+    }
+
+    /// Unpacks ZIP (ditto) or tar/gz/bz2/xz (tar) into a new folder named after the archive.
+    static func extract(_ src: URL) throws -> URL {
+        var base = baseName(src)
+        if base.lowercased().hasSuffix(".tar") { base = String(base.dropLast(4)) }
+        let dir = uniqueURL(in: src.deletingLastPathComponent(), base: base, ext: nil)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false)
+        do {
+            if ext(src) == "zip" { try run("/usr/bin/ditto", ["-x", "-k", src.path, dir.path]) }
+            else { try run("/usr/bin/tar", ["-xf", src.path, "-C", dir.path]) } // bsdtar refuses absolute and ../ paths
+        } catch {
+            try? FileManager.default.removeItem(at: dir)
+            throw error
+        }
+        return dir
+    }
+
+    /// One ZIP of everything dragged: "<name>.zip" for one item, "Archive.zip" for several (like Finder).
+    static func zip(_ urls: [URL]) throws -> URL {
+        let parent = urls[0].deletingLastPathComponent().standardizedFileURL
+        guard urls.allSatisfy({ $0.deletingLastPathComponent().standardizedFileURL == parent }) else {
+            throw ConvertError("Pick files from one folder to zip them together")
+        }
+        let out = uniqueURL(in: parent, base: urls.count == 1 ? urls[0].lastPathComponent : "Archive", ext: "zip")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+        process.currentDirectoryURL = parent // relative names, so the archive holds just the items
+        process.arguments = ["-r", "-y", "-q", out.path] + urls.map(\.lastPathComponent) + ["-x", "*.DS_Store", "__MACOSX/*"]
+        process.standardOutput = FileHandle.nullDevice
+        let errors = Pipe()
+        process.standardError = errors
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            try? FileManager.default.removeItem(at: out)
+            throw ConvertError(String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).ifEmpty("zip failed"))
+        }
+        return out
+    }
+
+    /// Several photos as one PDF, a page each, in name order. Pages are at most A4-sized; pictures keep full resolution.
+    static func combineImages(_ urls: [URL]) throws -> URL {
+        let sorted = urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        let out = uniqueURL(in: sorted[0].deletingLastPathComponent(), base: baseName(sorted[0]) + " combined", ext: "pdf")
+        guard let ctx = CGContext(out as CFURL, mediaBox: nil, nil) else { throw ConvertError("Can't create PDF") }
+        do {
+            for (i, url) in sorted.enumerated() {
+                Job.current?.report(Double(i) / Double(sorted.count))
+                let image = try loadImage(url)
+                let s = min(1, 842 / Double(max(image.width, image.height)))
+                var box = CGRect(x: 0, y: 0, width: Double(image.width) * s, height: Double(image.height) * s)
+                let page = [kCGPDFContextMediaBox as String: Data(bytes: &box, count: MemoryLayout<CGRect>.size)]
+                ctx.beginPDFPage(page as CFDictionary)
+                ctx.draw(image, in: box)
+                ctx.endPDFPage()
+            }
+            ctx.closePDF()
+        } catch {
+            ctx.closePDF()
+            try? FileManager.default.removeItem(at: out)
+            throw error
+        }
+        return out
+    }
+
     static func merge(_ urls: [URL]) throws -> URL {
         let sorted = urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         let merged = PDFDocument()
@@ -466,7 +672,9 @@ enum Converter {
 
     static func convertMedia(_ src: URL, to target: String) throws -> URL {
         var args = ["-i", src.path]
-        if let codec = audioCodec[target] {
+        if subtitleIn.contains(target) {
+            // Subtitles: ffmpeg converts between SRT, WebVTT and ASS by extension.
+        } else if let codec = audioCodec[target] {
             args += ["-map", "0:a:0", "-map_metadata", "0", "-c:a", codec] + (audioQuality[target] ?? [])
         } else if target == "gif" {
             // One filtergraph, two passes: build a palette from the clip, then map frames onto it.
@@ -563,4 +771,8 @@ enum Converter {
         }
         return text
     }
+}
+
+private extension String {
+    func ifEmpty(_ fallback: String) -> String { trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallback : self }
 }

@@ -3,6 +3,26 @@
 All notable changes to Swivel. Newest first.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [2.3] - 2026-10-23
+
+More formats, more tools, and no Homebrew needed.
+
+### Added
+- **One-click ffmpeg.** Settings and the welcome tour have a **Download ffmpeg** button. It fetches a ready-made Apple-silicon build (about 57 MB, from ffmpeg.martin-riedl.de) into Swivel's own folder. No Homebrew, Terminal or password. The download is pinned to an exact version by checksum and must be signed by that builder's Apple Developer ID. Homebrew's ffmpeg is still used if you have it.
+- **Documents:** Word (DOCX, DOC), RTF, ODT, HTML and TXT convert to each other and to **PDF**, laid out on proper A4/Letter pages.
+- **Archives:** a **Zip** slice on the actions wheel (one item → `name.zip`, several → `Archive.zip`), and **Extract** for ZIP, TAR, GZ, TGZ, BZ2 and XZ.
+- **Subtitles:** SRT, VTT and ASS convert to each other.
+- **Icons:** any photo → **ICO** (256 px) or **ICNS** (the full 16–1024 px set).
+- **Camera RAW** input (CR2, CR3, NEF, ARW, DNG, RAF, ORF, RW2).
+- **More inputs:** AVI, WMV, FLV, MPG, M4V, 3GP and TS video; WMA and AAC audio.
+- **One PDF:** drag 2+ photos to get a single PDF with a page per photo.
+- **PDF Compress** on the actions wheel (like Preview's Reduce File Size). Kept only if it gets smaller.
+- **No Location** slice: a copy of a photo or video without GPS location. Lossless where possible.
+
+### Changed
+- The wheel grows when it has more than 8 slices, so labels keep their room.
+- ffmpeg setup no longer opens Terminal or installs Homebrew.
+
 ## [2.2] - 2026-10-23
 
 Swivel can now update itself.
@@ -78,7 +98,8 @@ First release: an offline file converter in the menu bar.
 - Drag-to-Applications installer (DMG) and an original app icon.
 - Works without the Accessibility permission. Nothing is uploaded; everything runs on your Mac.
 
-[2.2]: https://github.com/foxfoxesfox/Swivel/compare/f59abb9...HEAD
+[2.3]: https://github.com/foxfoxesfox/Swivel/compare/20027e4...HEAD
+[2.2]: https://github.com/foxfoxesfox/Swivel/compare/f59abb9...20027e4
 [2.1]: https://github.com/foxfoxesfox/Swivel/compare/5d80321...f59abb9
 [2.0]: https://github.com/foxfoxesfox/Swivel/compare/f559c0e...5d80321
 [1.0]: https://github.com/foxfoxesfox/Swivel/commit/f559c0e

@@ -3,3 +3,5 @@ build.noindex/
 test-out/
 .DS_Store
 test.sh
+graphify-out/
+CLAUDE.md

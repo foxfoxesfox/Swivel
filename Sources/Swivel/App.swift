@@ -138,9 +138,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     /// No wheel for audio/video without ffmpeg: say why instead of doing nothing.
     @discardableResult
     func explainMissingFFmpeg(_ urls: [URL]) -> Bool {
-        let media = Converter.audioIn.union(Converter.videoIn)
-        guard Converter.ffmpegPath == nil, urls.contains(where: { media.contains(Converter.ext($0)) }) else { return false }
-        notify("Audio and video need ffmpeg", "Click here to install it from Swivel Settings. It's free.", opensSettings: true)
+        guard Converter.ffmpegPath == nil, urls.contains(where: { Converter.needsFFmpeg.contains(Converter.ext($0)) }) else { return false }
+        notify("Audio and video need ffmpeg", "Click to download it in Settings. It's free and takes one click.", opensSettings: true)
         return true
     }
 
@@ -214,10 +213,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                                               countStyle: .file)
                 }
                 let lines = zip(sources, outputs).map { "\($1.lastPathComponent): \(size($0)) → \(size($1))" }
-                let done = ["Compress": "Compressed", "Resize": "Resized", "Send-ready": "Ready to send"][label] ?? label
+                let done = ["Compress": "Compressed", "Resize": "Resized", "Send-ready": "Ready to send", "Remove location": "Location removed"][label] ?? label
                 notify(done, lines.joined(separator: "\n"), outputs: outputs)
             } else {
-                notify("Converted to \(label)", outputs.map(\.lastPathComponent).joined(separator: ", "), outputs: outputs)
+                let title = ["zip": "Zipped", "extract": "Extracted", "combine": "Combined into one PDF"][target] ?? "Converted to \(label)"
+                notify(title, outputs.map(\.lastPathComponent).joined(separator: ", "), outputs: outputs)
             }
         } else {
             lastResult = "Last conversion failed"
@@ -336,7 +336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             _ = add("ffmpeg: \(ff)")
         } else {
             _ = add("ffmpeg missing: audio, video, WebP, AVIF are off")
-            _ = add(FFmpegSetup.brewPath != nil ? "Install ffmpeg…" : "Install Homebrew and ffmpeg…", #selector(installFFmpeg))
+            _ = add("Download ffmpeg (free, \(FFmpegSetup.downloadMB) MB)…", #selector(installFFmpeg))
         }
         menu.addItem(.separator())
         if let release = updater.release {
@@ -427,7 +427,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         window?.makeKeyAndOrderFront(nil)
     }
 
-    @objc func installFFmpeg() { FFmpegSetup.install() }
+    /// Opens Settings, where the download shows its progress.
+    @objc func installFFmpeg() {
+        showSettings()
+        FFmpegSetup.shared.install()
+    }
 
     @objc func toggleLaunchAtLogin() {
         do {

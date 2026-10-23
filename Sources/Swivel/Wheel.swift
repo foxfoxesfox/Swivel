@@ -41,7 +41,7 @@ final class WheelPanel: NSPanel {
         self.mode = mode
         self.clickMode = clickMode
         setFrame(screen.frame, display: false)
-        let r = wheelView.outer + 8 // keep the whole wheel on screen near edges
+        let r = WheelView.outerRadius(items.count) + 8 // keep the whole wheel on screen near edges
         let local = NSPoint(x: min(max(point.x - screen.frame.minX, r), screen.frame.width - r),
                             y: min(max(point.y - screen.frame.minY, r), screen.frame.height - r))
         wheelView.configure(center: local, items: items, files: files, clickMode: clickMode)
@@ -70,7 +70,10 @@ final class WheelPanel: NSPanel {
 
 final class WheelView: NSView {
     var onPick: ((String, [URL]) -> Void)?
-    let outer: CGFloat = 160, inner: CGFloat = 46
+    let inner: CGFloat = 46
+    var outer: CGFloat { Self.outerRadius(items.count) }
+    /// The wheel grows past 8 slices so labels keep their room.
+    static func outerRadius(_ count: Int) -> CGFloat { count > 10 ? 196 : count > 8 ? 178 : 160 }
     private var items: [WheelItem] = []
     private var center = NSPoint.zero
     private var files: [URL] = []

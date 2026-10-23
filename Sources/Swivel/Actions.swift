@@ -17,8 +17,15 @@ final class FileActions: NSObject, NSSharingServicePickerDelegate {
     ]
 
     /// Compress and Resize join the wheel when every file is a photo or video.
+    static let zipItem = WheelItem(id: "zip", label: "Zip", symbol: "doc.zipper")
+    static let stripItem = WheelItem(id: "strip", label: "No Location", symbol: "location.slash")
+
+    /// Zip for anything; photos and videos add Compress, Resize, Send and No Location; PDFs add Compress.
     static func items(for urls: [URL]) -> [WheelItem] {
-        !urls.isEmpty && urls.allSatisfy(Converter.canUseTools) ? items + mediaItems : items
+        guard !urls.isEmpty else { return items }
+        if urls.allSatisfy(Converter.canUseTools) { return items + [zipItem] + mediaItems + [stripItem] }
+        if urls.allSatisfy({ Converter.ext($0) == "pdf" }) { return items + [zipItem, mediaItems[0]] }
+        return items + [zipItem]
     }
 
     static let presets: [String: [(id: String, title: String)]] = [
@@ -59,6 +66,8 @@ final class FileActions: NSObject, NSSharingServicePickerDelegate {
             report(urls.count == 1 ? "Copied path" : "Copied \(urls.count) paths", urls.map(\.path).joined(separator: "\n"))
         case "compress", "resize", "send":
             showPresets(id, urls, what, at: point)
+        case "zip", "strip":
+            runTool(urls, id)
         case "terminal":
             let folders = Set(urls.map { $0.hasDirectoryPath ? $0 : $0.deletingLastPathComponent() })
             let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
@@ -73,7 +82,8 @@ final class FileActions: NSObject, NSSharingServicePickerDelegate {
         presetURLs = urls
         let menu = NSMenu()
         menu.addItem(withTitle: "\(["compress": "Compress", "resize": "Resize", "send": "Make sendable:"][id]!) \(what)", action: nil, keyEquivalent: "")
-        for preset in Self.presets[id]! {
+        let pdfsOnly = urls.allSatisfy { Converter.ext($0) == "pdf" }
+        for preset in pdfsOnly ? [("compress-balanced", "Reduce file size (like Preview)")] : Self.presets[id]! {
             let item = menu.addItem(withTitle: preset.title, action: #selector(pickPreset(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = preset.id

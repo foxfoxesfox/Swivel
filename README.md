@@ -15,7 +15,7 @@ What's new in each version: [CHANGELOG.md](CHANGELOG.md).
 ## Build
 
 ```bash
-brew install ffmpeg      # needed for audio, video, WebP and AVIF
+brew install ffmpeg      # optional: otherwise Swivel downloads its own copy with one click
 ./build.sh               # -> build.noindex/Swivel.app
 ```
 
@@ -43,13 +43,14 @@ Swivel has two wheels, and each can open in two ways (pick them in the tour or i
 - The centre shows a preview of the file you're dragging (with a count for several). The format you use most for that type moves to the top slice, in the accent colour.
 - From Finder's right-click, the keyboard works too: **1–9** pick a slice, **← →** move around, **Return** picks, **Esc** cancels. (Not mid-drag: reading keys there would need an extra macOS permission, and Swivel needs none.)
 
-The actions wheel works on any files or folders: **AirDrop**, **Share** (Messages, Mail, Notes…), **Copy** (paste in Finder), **Move** (pick a folder), **Copy Path**, and **Terminal** (opens the folder).
+The actions wheel works on any files or folders: **AirDrop**, **Share** (Messages, Mail, Notes…), **Copy** (paste in Finder), **Move** (pick a folder), **Copy Path**, **Terminal** (opens the folder) and **Zip** (one item → `name.zip`, several → `Archive.zip`). PDFs also get **Compress** (like Preview's Reduce File Size). The wheel grows when it has more than 8 slices.
 
-For photos and videos it also has **Compress**, **Resize** and **Send**, each with a small menu of presets:
+For photos and videos it also has **Compress**, **Resize**, **Send** and **No Location**:
 
 - **Compress:** Best quality, Balanced or Smallest file. JPG, HEIC, WebP and AVIF keep their format; PNG, TIFF, BMP and GIF become JPG (on a white background). Videos keep their format. If the result wouldn't be smaller, no copy is kept.
 - **Resize:** 50%, 25%, or fit within 1920 / 1280 / 640 px on the longest side. Never enlarges; transparency is kept.
 - **Send:** fit under **10 MB (Discord)**, **16 MB (WhatsApp)** or **25 MB (email)**. Photos become JPG, videos MP4 (sized from their length, two-pass encoded, resolution lowered if needed), and location data is removed. Videos too long to fit get a clear message. Apps change their limits, so the menu shows the MB Swivel aims for.
+- **No Location:** a copy without GPS location. Photos are copied losslessly where macOS can; videos keep their streams untouched.
 
 Results are new files next to the original (`photo compressed.jpg`, `clip resized.mp4`), and the notification shows the size before → after.
 
@@ -59,12 +60,15 @@ While converting, the menu bar icon becomes a ring that fills up, and the menu s
 
 | Input | Wheel options |
 |---|---|
-| JPG PNG HEIC TIFF BMP GIF WebP AVIF | JPG, PNG, HEIC, TIFF, BMP, GIF, PDF, WebP\*, AVIF\* |
-| MP3 M4A WAV FLAC OGG Opus AIFF | each other\* |
-| MP4 MOV MKV WebM | each other, GIF (≤720px wide, 15 fps), MP3\* |
+| JPG PNG HEIC TIFF BMP GIF WebP AVIF, camera RAW (CR2, CR3, NEF, ARW, DNG, RAF, ORF, RW2) | JPG, PNG, HEIC, TIFF, BMP, GIF, PDF, ICO, ICNS, WebP\*, AVIF\*; **One PDF** when 2+ photos are dragged |
+| MP3 M4A WAV FLAC OGG Opus AIFF WMA AAC | MP3, M4A, WAV, FLAC, OGG, Opus, AIFF\* |
+| MP4 MOV MKV WebM AVI WMV FLV MPG M4V 3GP TS | MP4, MOV, MKV, WebM, GIF (≤720px wide, 15 fps), MP3\* |
 | PDF | PNG / JPG (300 DPI), TXT, Split; Merge when 2+ PDFs are dragged |
+| Word (DOCX, DOC), RTF, ODT, HTML, TXT | PDF (paginated), DOCX, RTF, HTML, TXT, ODT |
+| ZIP, TAR, GZ, TGZ, BZ2, XZ | Extract (into a folder named after the archive) |
+| SRT, VTT, ASS subtitles | each other\* |
 
-\* needs ffmpeg. An option only appears if your ffmpeg has the encoder it needs.
+\* needs ffmpeg. Swivel uses Homebrew's ffmpeg if you have it; otherwise **Settings → Download ffmpeg** fetches a signed Apple-silicon build (about 57 MB, from ffmpeg.martin-riedl.de) into Swivel's own folder. The download is pinned to an exact version by checksum, and Swivel checks it's signed by that builder's Apple Developer ID before using it. An option only appears if the ffmpeg in use has the encoder it needs.
 
 Notes:
 - Transparency is flattened onto white for JPG and AVIF.
@@ -106,7 +110,7 @@ Send `dist/Swivel.dmg` (AirDrop, Drive, a message), or point them at this repo. 
 1. Double-clicks the DMG. A window opens; they drag **Swivel** onto **Applications**.
 2. Opens Swivel from Applications. The first time, macOS blocks it because it isn't notarized by Apple ("Apple could not verify…"). They click **Done**, then go to **System Settings → Privacy & Security**, scroll down, click **Open Anyway** next to Swivel, and confirm. They only do this once.
    (On macOS 14 and older, right-click Swivel → **Open** → **Open** works too.)
-3. For audio, video, WebP and AVIF they need ffmpeg (images and PDFs work without it). Swivel walks them through it: the last tour page and Settings have an **Install ffmpeg** button that opens Terminal and runs `brew install ffmpeg`, installing Homebrew first with its official installer if needed (that step asks for their Mac password). Swivel restarts itself when it's done. Dragging a song or video without ffmpeg shows a notification that leads to the same button.
+3. For audio, video, WebP, AVIF and subtitles they need ffmpeg (photos, PDFs, documents and archives work without it). The last tour page and Settings have a **Download ffmpeg** button: one click, about 57 MB, no Terminal or password. Swivel restarts itself when it's done. Dragging a song or video without ffmpeg shows a notification that leads to the same button.
 
 Skipping the warning entirely needs an Apple Developer ID ($99/year) to sign and notarize the app.
 

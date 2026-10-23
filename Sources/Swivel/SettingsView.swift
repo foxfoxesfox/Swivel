@@ -196,10 +196,13 @@ struct SettingsView: View {
             }
             Section("ffmpeg") { FFmpegRows() }
             Section {
-                formats("Images", "JPG, PNG, HEIC, TIFF, BMP, GIF, PDF, WebP*, AVIF*")
-                formats("Audio", "MP3, M4A, WAV, FLAC, OGG, Opus, AIFF")
-                formats("Video", "MP4, MOV, MKV, WebM, GIF, MP3")
+                formats("Images", "JPG, PNG, HEIC, TIFF, BMP, GIF, PDF, ICO, ICNS, WebP*, AVIF*; camera RAW in; several → one PDF")
+                formats("Audio", "MP3, M4A, WAV, FLAC, OGG, Opus, AIFF; WMA, AAC in")
+                formats("Video", "MP4, MOV, MKV, WebM, GIF, MP3; AVI, WMV, FLV, MPG and more in")
                 formats("PDF", "PNG, JPG, TXT, Split, Merge (2+ PDFs)")
+                formats("Documents", "Word, RTF, ODT, HTML, TXT ↔ each other, and → PDF")
+                formats("Archives", "ZIP, TAR, GZ → Extract; anything → Zip (actions wheel)")
+                formats("Subtitles", "SRT, VTT, ASS ↔ each other*")
             } header: {
                 Text("What converts to what")
             } footer: {
@@ -232,7 +235,7 @@ struct HowTo: View {
         }
         if prefs.actionsDrag {
             step("square.and.arrow.up", "Share: drag, then tap \(prefs.actionsKey.title)",
-                 "Let go on AirDrop, Share, Copy, Move, Copy Path or Terminal. Photos and videos also get Compress, Resize and Send (fit under 10, 16 or 25 MB).")
+                 "Let go on AirDrop, Share, Copy, Move, Copy Path, Terminal or Zip. Photos and videos also get Compress, Resize, Send (fit under 10, 16 or 25 MB) and No Location; PDFs get Compress.")
         }
         if prefs.actionsFinder {
             step("cursorarrow.click.2", "Share: \(finderMenuPath) Share with Swivel",
@@ -343,46 +346,35 @@ struct GeneralRows: View {
 }
 
 struct FFmpegRows: View {
-    // Parameters (defaulting to the live state) so the "missing" layout can be previewed.
+    @ObservedObject var setup = FFmpegSetup.shared
+    // Parameter (defaulting to the live state) so the "missing" layout can be previewed.
     var path = Converter.ffmpegPath
-    var brew = FFmpegSetup.brewPath
 
     var body: some View {
         if let path {
-            Label("Installed at \(path)", systemImage: "checkmark.circle.fill")
+            Label(path.hasPrefix(Converter.ownFFmpegDir.path) ? "Installed (downloaded by Swivel)" : "Installed at \(path)",
+                  systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
         } else {
-            Label("ffmpeg isn't installed. Photos and PDFs work; audio, video, WebP and AVIF need it.",
-                  systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+            Label("Audio, video, WebP, AVIF and subtitles need ffmpeg, a free converter. Photos, PDFs, documents and archives work without it.",
+                  systemImage: "info.circle.fill")
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            VStack(alignment: .leading, spacing: 8) {
-                Text(brew != nil
-                     ? "ffmpeg is free. Swivel can install it with Homebrew: Terminal opens so you can watch, and it takes a few minutes."
-                     : "ffmpeg is free and installs with Homebrew, a free tool for adding Mac software. Swivel can install both: Terminal opens and asks for your Mac password once.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Button(brew != nil ? "Install ffmpeg" : "Install Homebrew and ffmpeg", action: FFmpegSetup.install)
-                        .buttonStyle(.borderedProminent)
-                    if brew == nil {
-                        Link("What's Homebrew?", destination: URL(string: "https://brew.sh")!)
-                    }
+            switch setup.state {
+            case .downloading(let fraction):
+                ProgressView(value: fraction) { Text("Downloading ffmpeg… \(Int(fraction * 100))%") }
+            case .installing:
+                ProgressView { Text("Installing. Swivel will restart in a moment.") }
+            default:
+                HStack(alignment: .center) {
+                    Text("One click, about \(FFmpegSetup.downloadMB) MB from \(FFmpegSetup.source). No Terminal or password needed.")
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("Download ffmpeg") { setup.install() }.buttonStyle(.borderedProminent)
                 }
-            }
-            .padding(.vertical, 2)
-            HStack {
-                Text("Swivel restarts when the install finishes.").foregroundStyle(.secondary)
-                Spacer()
-                Button("Restart Swivel", action: FFmpegSetup.restart)
-            }
-            HStack {
-                Text("Or in Terminal:").foregroundStyle(.secondary)
-                Text("brew install ffmpeg").font(.body.monospaced()).textSelection(.enabled)
-                Spacer()
-                Button("Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString("brew install ffmpeg", forType: .string)
+                if case .failed(let message) = setup.state {
+                    Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
