@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import QuickLookThumbnailing
 import ServiceManagement
 import SwiftUI
@@ -20,6 +21,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var settingsWindow: NSWindow?
     var welcomeWindow: NSWindow?
     var updateWindow: NSWindow?
+    var editors: [Editor] = [] // open Crop/Trim windows
+    var pendingWebDrop: WebDrop? // what a browser drag carries, while its wheel is open
+    var produced: Set<String> = [] // files Swivel made this run, so watch folders skip them
+    lazy var watcher = FolderWatcher(onFile: { [weak self] url, target in self?.convert([url], to: target) },
+                                     isOwnOutput: { [weak self] path in self?.produced.contains(path) ?? false })
+    var watchSubscription: AnyCancellable?
     let updater = Updater.shared
 
     // Drag polling state (no Accessibility permission needed).
@@ -47,12 +54,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         actions.report = { [weak self] title, body in self?.notify(title, body) }
         actions.runTool = { [weak self] urls, preset in self?.convert(urls, to: preset) }
+        actions.openEditor = { [weak self] id, urls in self?.openEditor(id, urls) }
         wheel.wheelView.onPick = { [weak self] id, urls in
             guard let self else { return }
+            if urls.isEmpty, let web = self.pendingWebDrop { // browser drag: save to Downloads, then convert
+                return self.convert([], to: id, name: web.name + "." + web.ext, prepare: { [try web.save()] })
+            }
+            guard !urls.isEmpty else { return }
             if self.wheel.mode == .convert { return self.convert(urls, to: id) }
             // Async: the drop handler must return before an action opens a panel or popover.
             DispatchQueue.main.async { self.actions.perform(id, on: urls, at: NSEvent.mouseLocation) }
         }
+
+        watchSubscription = prefs.$watchRules.sink { [weak self] rules in self?.watcher.update(rules) }
 
         // Finder right-click items (Services, declared in Info.plist).
         NSApp.servicesProvider = self
@@ -120,6 +134,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         else if prefs.actionsDrag && tapped.contains(prefs.actionsKey.flag) { mode = .actions }
         else { return }
         let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        pendingWebDrop = nil
+        if urls.isEmpty, mode == .convert, let web = WebDrop.read(pb) { // dragged out of a browser
+            let items = Converter.targets(forExt: web.ext).filter { !prefs.hiddenFormats.contains($0) }
+                .map { WheelItem(id: $0, label: Converter.label($0)) }
+            guard !items.isEmpty else { return }
+            pendingWebDrop = web
+            return wheel.show(at: NSEvent.mouseLocation, items: items, mode: mode, files: [])
+        }
         let items = self.items(mode, urls)
         if !items.isEmpty { wheel.show(at: NSEvent.mouseLocation, items: items, mode: mode, files: urls) }
         else if mode == .convert { explainMissingFFmpeg(urls) }
@@ -129,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard !urls.isEmpty else { return [] }
         if mode == .actions { return FileActions.items(for: urls) }
         // Smart wheel: the usual format for this file type goes first (top slice) and is highlighted.
-        let targets = Converter.targets(for: urls)
+        let targets = Converter.targets(for: urls).filter { !prefs.hiddenFormats.contains($0) }
         let favorite = Usage.favorite(Converter.ext(urls[0])).flatMap { targets.contains($0) ? $0 : nil }
         let ordered = favorite.map { fav in [fav] + targets.filter { $0 != fav } } ?? targets
         return ordered.map { WheelItem(id: $0, label: Converter.label($0), suggested: $0 == favorite) }
@@ -166,9 +188,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // MARK: - Converting
 
-    func convert(_ urls: [URL], to target: String) {
+    /// `prepare` fetches the files first (browser drags), inside the job so it shows progress and can be cancelled.
+    func convert(_ urls: [URL], to target: String, name: String? = nil, prepare: (() throws -> [URL])? = nil) {
         if !Converter.isTool(target) { Set(urls.map(Converter.ext)).forEach { Usage.record($0, target) } }
-        let job = Job(name: urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) files")
+        let job = Job(name: name ?? (urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) files"))
         let id = ObjectIdentifier(job)
         var lastSent = -1.0 // only touched on the job's background thread
         job.onProgress = { [weak self] fraction in
@@ -183,8 +206,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         jobs.append(job)
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = Converter.convertAll(urls, to: target, job: job)
-            DispatchQueue.main.async { self.finish(job, target, urls, result.outputs, result.errors) }
+            var files = urls, result: (outputs: [URL], errors: [String])
+            do {
+                if let prepare {
+                    Job.current = job
+                    files = try prepare()
+                    Job.current = nil
+                }
+                result = Converter.convertAll(files, to: target, job: job)
+            } catch {
+                Job.current = nil
+                result = ([], ["\(name ?? "Download"): \(error.localizedDescription)"])
+            }
+            DispatchQueue.main.async { self.finish(job, target, files, result.outputs, result.errors) }
         }
     }
 
@@ -198,6 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         progress[ObjectIdentifier(job)] = nil
         jobs.removeAll { $0 === job }
         Recents.add(outputs)
+        produced.formUnion(outputs.map(\.path))
         outputs.forEach(cacheThumbnail)
         if job.isCancelled {
             lastResult = "Last conversion cancelled"
@@ -213,7 +248,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                                               countStyle: .file)
                 }
                 let lines = zip(sources, outputs).map { "\($1.lastPathComponent): \(size($0)) → \(size($1))" }
-                let done = ["Compress": "Compressed", "Resize": "Resized", "Send-ready": "Ready to send", "Remove location": "Location removed"][label] ?? label
+                let done = ["Compress": "Compressed", "Resize": "Resized", "Send-ready": "Ready to send", "Remove location": "Location removed",
+                            "Crop": "Cropped", "Trim": "Trimmed"][label] ?? label
                 notify(done, lines.joined(separator: "\n"), outputs: outputs)
             } else {
                 let title = ["zip": "Zipped", "extract": "Extracted", "combine": "Combined into one PDF"][target] ?? "Converted to \(label)"
@@ -380,6 +416,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }))
     }
 
+    func openEditor(_ id: String, _ urls: [URL]) {
+        let done: (URL, String) -> Void = { [weak self] file, target in self?.convert([file], to: target) }
+        let editor: Editor = id == "crop" ? CropController(files: urls, onCrop: done) : TrimController(files: urls, onTrim: done)
+        editor.onClose = { [weak self, weak editor] in
+            self?.editors.removeAll { $0 === editor }
+            self?.dropDockIconIfNoWindows()
+        }
+        editors.append(editor)
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        editor.show()
+    }
+
     /// Opening Swivel again (Applications, Spotlight, Dock) brings its window back.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if UserDefaults.standard.bool(forKey: "didOnboard") { showSettings() } else { showWelcome() }
@@ -387,10 +436,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     /// Back to menu-bar-only once the last Swivel window closes.
-    func windowWillClose(_ notification: Notification) {
-        let closing = notification.object as? NSWindow
-        let others = [settingsWindow, welcomeWindow, updateWindow].contains { $0 != nil && $0 !== closing && $0!.isVisible }
-        if !others { NSApp.setActivationPolicy(.accessory) }
+    func windowWillClose(_ notification: Notification) { dropDockIconIfNoWindows(closing: notification.object as? NSWindow) }
+
+    func dropDockIconIfNoWindows(closing: NSWindow? = nil) {
+        DispatchQueue.main.async { // after the closing window is gone
+            let open = NSApp.windows.contains { $0 !== closing && $0.isVisible && !($0 is NSPanel) && $0.styleMask.contains(.titled) }
+            if !open { NSApp.setActivationPolicy(.accessory) }
+        }
     }
 
     /// Menus shown while a window is open, so ⌘W, ⌘Q, ⌘, and ⌘C work.

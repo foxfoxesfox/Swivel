@@ -42,6 +42,14 @@ final class Prefs: ObservableObject {
     @Published var actionsDrag: Bool { didSet { d.set(actionsDrag, forKey: "actionsDrag") } }
     @Published var actionsKey: TriggerKey { didSet { d.set(actionsKey.rawValue, forKey: "actionsKey") } }
     @Published var autoUpdate: Bool { didSet { d.set(autoUpdate, forKey: "autoUpdate") } }
+
+    // Wheel customisation: order and visibility of action slices, formats hidden from the convert wheel.
+    static let defaultActionOrder = ["airdrop", "share", "copy", "move", "path", "terminal", "zip",
+                                     "compress", "resize", "send", "strip", "crop", "trim"]
+    @Published var actionOrder: [String] { didSet { d.set(actionOrder, forKey: "actionOrder") } }
+    @Published var hiddenActions: [String] { didSet { d.set(hiddenActions, forKey: "hiddenActions") } }
+    @Published var hiddenFormats: [String] { didSet { d.set(hiddenFormats, forKey: "hiddenFormats") } }
+    @Published var watchRules: [WatchRule] { didSet { d.set(try? JSONEncoder().encode(watchRules), forKey: "watchRules") } }
     @Published var actionsFinder: Bool {
         didSet { d.set(actionsFinder, forKey: "actionsFinder"); FinderMenu.set(.actions, enabled: actionsFinder) }
     }
@@ -56,7 +64,23 @@ final class Prefs: ObservableObject {
         actionsKey = TriggerKey(rawValue: d.string(forKey: "actionsKey") ?? "") ?? .control
         actionsFinder = d.bool(forKey: "actionsFinder")
         autoUpdate = d.bool(forKey: "autoUpdate")
+        let saved = d.stringArray(forKey: "actionOrder") ?? []
+        actionOrder = saved + Self.defaultActionOrder.filter { !saved.contains($0) } // new actions join at the end
+        hiddenActions = d.stringArray(forKey: "hiddenActions") ?? []
+        hiddenFormats = d.stringArray(forKey: "hiddenFormats") ?? []
+        watchRules = d.data(forKey: "watchRules").flatMap { try? JSONDecoder().decode([WatchRule].self, from: $0) } ?? []
         if actionsKey == convertKey { actionsKey = TriggerKey.allCases.first { $0 != convertKey }! }
+    }
+
+    func moveAction(_ id: String, by offset: Int) {
+        guard let i = actionOrder.firstIndex(of: id), actionOrder.indices.contains(i + offset) else { return }
+        actionOrder.swapAt(i, i + offset)
+    }
+
+    func resetWheel() {
+        actionOrder = Self.defaultActionOrder
+        hiddenActions = []
+        hiddenFormats = []
     }
 
     /// Keys a wheel may use: anything except the key the other wheel already uses.

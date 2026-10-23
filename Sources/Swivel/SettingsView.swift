@@ -185,6 +185,21 @@ struct SettingsView: View {
             Section("How to use") { HowTo(prefs: prefs) }
             Section("Converting") { ConvertRows(prefs: prefs) }
             Section("Share and file actions") { ActionsRows(prefs: prefs) }
+            Section {
+                WheelRows(prefs: prefs)
+            } header: {
+                Text("Wheel")
+            } footer: {
+                Text("Slices only appear when they fit the files you drag; e.g. Trim only for videos.").foregroundStyle(.secondary)
+            }
+            Section {
+                WatchRows(prefs: prefs)
+            } header: {
+                Text("Watch folders")
+            } footer: {
+                Text("New files in these folders are converted automatically, e.g. Desktop screenshots → JPG. Originals are kept, and Swivel ignores its own results. macOS may ask once for permission to see a folder.")
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             Section("General") {
                 GeneralRows(login: login)
                 HStack {
@@ -200,7 +215,7 @@ struct SettingsView: View {
                 formats("Audio", "MP3, M4A, WAV, FLAC, OGG, Opus, AIFF; WMA, AAC in")
                 formats("Video", "MP4, MOV, MKV, WebM, GIF, MP3; AVI, WMV, FLV, MPG and more in")
                 formats("PDF", "PNG, JPG, TXT, Split, Merge (2+ PDFs)")
-                formats("Documents", "Word, RTF, ODT, HTML, TXT ↔ each other, and → PDF")
+                formats("Documents", "Word, RTF, ODT, HTML, TXT ↔ each other; Markdown, EPUB in; all → PDF")
                 formats("Archives", "ZIP, TAR, GZ → Extract; anything → Zip (actions wheel)")
                 formats("Subtitles", "SRT, VTT, ASS ↔ each other*")
             } header: {
@@ -235,7 +250,7 @@ struct HowTo: View {
         }
         if prefs.actionsDrag {
             step("square.and.arrow.up", "Share: drag, then tap \(prefs.actionsKey.title)",
-                 "Let go on AirDrop, Share, Copy, Move, Copy Path, Terminal or Zip. Photos and videos also get Compress, Resize, Send (fit under 10, 16 or 25 MB) and No Location; PDFs get Compress.")
+                 "Let go on AirDrop, Share, Copy, Move, Copy Path, Terminal or Zip. Photos and videos also get Compress, Resize, Send (fit under 10, 16 or 25 MB), No Location, and Crop or Trim; PDFs get Compress.")
         }
         if prefs.actionsFinder {
             step("cursorarrow.click.2", "Share: \(finderMenuPath) Share with Swivel",
@@ -522,5 +537,85 @@ struct UpdateView: View {
         let cleaned = lines.joined(separator: "\n")
         return (try? AttributedString(markdown: cleaned, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(cleaned)
+    }
+}
+
+/// Reorder and hide action slices; hide formats from the convert wheel.
+struct WheelRows: View {
+    @ObservedObject var prefs: Prefs
+    static let formats = ["jpg", "png", "heic", "tiff", "bmp", "gif", "webp", "avif", "ico", "icns", "pdf", "combine",
+                          "mp3", "m4a", "wav", "flac", "ogg", "opus", "aiff", "mp4", "mov", "mkv", "webm",
+                          "docx", "rtf", "html", "txt", "odt", "srt", "vtt", "ass", "split", "merge", "extract"]
+
+    var body: some View {
+        Text("Actions wheel: order and visibility").font(.headline)
+        ForEach(prefs.actionOrder, id: \.self) { id in
+            if let item = FileActions.allItems.first(where: { $0.id == id }) {
+                HStack(spacing: 10) {
+                    Toggle(isOn: Binding(get: { !prefs.hiddenActions.contains(id) },
+                                         set: { show in prefs.hiddenActions.removeAll { $0 == id }; if !show { prefs.hiddenActions.append(id) } })) {
+                        Label(item.label, systemImage: item.symbol ?? "circle")
+                    }
+                    .toggleStyle(.checkbox)
+                    Spacer()
+                    Button { prefs.moveAction(id, by: -1) } label: { Image(systemName: "chevron.up") }
+                        .buttonStyle(.borderless).disabled(prefs.actionOrder.first == id)
+                        .accessibilityLabel("Move \(item.label) up")
+                    Button { prefs.moveAction(id, by: 1) } label: { Image(systemName: "chevron.down") }
+                        .buttonStyle(.borderless).disabled(prefs.actionOrder.last == id)
+                        .accessibilityLabel("Move \(item.label) down")
+                }
+            }
+        }
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Convert wheel: formats to show").font(.headline)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 4), alignment: .leading, spacing: 6) {
+                ForEach(Self.formats, id: \.self) { id in
+                    Toggle(Converter.label(id), isOn: Binding(get: { !prefs.hiddenFormats.contains(id) },
+                                                             set: { show in prefs.hiddenFormats.removeAll { $0 == id }; if !show { prefs.hiddenFormats.append(id) } }))
+                        .toggleStyle(.checkbox)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        HStack {
+            Spacer()
+            Button("Reset Wheel to Defaults") { prefs.resetWheel() }
+        }
+    }
+}
+
+struct WatchRows: View {
+    @ObservedObject var prefs: Prefs
+
+    var body: some View {
+        ForEach(prefs.watchRules, id: \.self) { rule in
+            HStack {
+                Label((rule.path as NSString).abbreviatingWithTildeInPath, systemImage: "folder")
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Picker("Convert to", selection: Binding(get: { rule.target }, set: { new in
+                    if let i = prefs.watchRules.firstIndex(of: rule) { prefs.watchRules[i].target = new }
+                })) {
+                    ForEach(WatchRule.choices, id: \.id) { Text($0.title).tag($0.id) }
+                }
+                .labelsHidden()
+                .frame(width: 190)
+                Button { prefs.watchRules.removeAll { $0 == rule } } label: { Image(systemName: "minus.circle") }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Stop watching \((rule.path as NSString).lastPathComponent)")
+            }
+        }
+        Button("Add Watch Folder…") {
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+            panel.prompt = "Watch"
+            panel.message = "New files in this folder will be converted automatically."
+            NSApp.activate(ignoringOtherApps: true)
+            if panel.runModal() == .OK, let url = panel.url, !prefs.watchRules.contains(where: { $0.path == url.path }) {
+                prefs.watchRules.append(WatchRule(path: url.path, target: "jpg"))
+            }
+        }
     }
 }

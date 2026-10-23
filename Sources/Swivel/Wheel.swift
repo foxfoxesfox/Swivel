@@ -98,7 +98,7 @@ final class WheelView: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        registerForDraggedTypes([.fileURL])
+        registerForDraggedTypes([.fileURL, .URL, .png, .tiff]) // files, and images/links from browsers
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self))
     }
 
@@ -343,10 +343,9 @@ final class WheelView: NSView {
     override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { highlighted != nil }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard let i = highlighted,
-              let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
-                                                               options: [.urlReadingFileURLsOnly: true]) as? [URL],
-              !urls.isEmpty else { return false }
+        guard let i = highlighted else { return false }
+        // No local files means a browser drag; the app already holds what it carries.
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
         onPick?(items[i].id, urls)
         return true
     }

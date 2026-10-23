@@ -1,5 +1,7 @@
 # Swivel
 
+![Swivel: convert any file while you drag it](Resources/social-preview.png)
+
 A small offline file converter for the macOS menu bar. 
 
 Start dragging a file, tap **Shift**, and a format wheel opens at the cursor. Release on a slice and Swivel writes a converted copy next to the original. The original is never changed or moved.
@@ -45,14 +47,22 @@ Swivel has two wheels, and each can open in two ways (pick them in the tour or i
 
 The actions wheel works on any files or folders: **AirDrop**, **Share** (Messages, Mail, Notes…), **Copy** (paste in Finder), **Move** (pick a folder), **Copy Path**, **Terminal** (opens the folder) and **Zip** (one item → `name.zip`, several → `Archive.zip`). PDFs also get **Compress** (like Preview's Reduce File Size). The wheel grows when it has more than 8 slices.
 
-For photos and videos it also has **Compress**, **Resize**, **Send** and **No Location**:
+For photos and videos it also has **Compress**, **Resize**, **Send** and **No Location**, plus **Crop** (photos) and **Trim** (MP4/MOV/M4V):
 
 - **Compress:** Best quality, Balanced or Smallest file. JPG, HEIC, WebP and AVIF keep their format; PNG, TIFF, BMP and GIF become JPG (on a white background). Videos keep their format. If the result wouldn't be smaller, no copy is kept.
 - **Resize:** 50%, 25%, or fit within 1920 / 1280 / 640 px on the longest side. Never enlarges; transparency is kept.
 - **Send:** fit under **10 MB (Discord)**, **16 MB (WhatsApp)** or **25 MB (email)**. Photos become JPG, videos MP4 (sized from their length, two-pass encoded, resolution lowered if needed), and location data is removed. Videos too long to fit get a clear message. Apps change their limits, so the menu shows the MB Swivel aims for.
+- **Crop:** drag a frame on a preview (Free, 1:1, 4:3, 16:9, 9:16); several photos are cropped one after another.
+- **Trim:** macOS's own trim bar; lossless and fast (streams are copied, not re-encoded).
 - **No Location:** a copy without GPS location. Photos are copied losslessly where macOS can; videos keep their streams untouched.
 
 Results are new files next to the original (`photo compressed.jpg`, `clip resized.mp4`), and the notification shows the size before → after.
+
+**From a browser:** drag an image or a link to a file out of Safari or Chrome, tap the convert key and pick a format. The original is saved to Downloads, then converted.
+
+**Watch folders** (Settings): new files in a chosen folder are converted automatically, e.g. Desktop screenshots → JPG. Originals are kept, unfinished downloads are waited for, and Swivel never re-processes its own results. macOS may ask once for permission to see the folder.
+
+**Make the wheel yours** (Settings → Wheel): reorder or hide action slices, and hide formats you never use.
 
 Converted files land next to the original: `photo.png` → `photo.jpg`, or `photo 2.jpg` if that name is taken.
 
@@ -64,7 +74,7 @@ While converting, the menu bar icon becomes a ring that fills up, and the menu s
 | MP3 M4A WAV FLAC OGG Opus AIFF WMA AAC | MP3, M4A, WAV, FLAC, OGG, Opus, AIFF\* |
 | MP4 MOV MKV WebM AVI WMV FLV MPG M4V 3GP TS | MP4, MOV, MKV, WebM, GIF (≤720px wide, 15 fps), MP3\* |
 | PDF | PNG / JPG (300 DPI), TXT, Split; Merge when 2+ PDFs are dragged |
-| Word (DOCX, DOC), RTF, ODT, HTML, TXT | PDF (paginated), DOCX, RTF, HTML, TXT, ODT |
+| Word (DOCX, DOC), RTF, ODT, HTML, TXT, Markdown, EPUB | PDF (paginated), DOCX, RTF, HTML, TXT, ODT |
 | ZIP, TAR, GZ, TGZ, BZ2, XZ | Extract (into a folder named after the archive) |
 | SRT, VTT, ASS subtitles | each other\* |
 

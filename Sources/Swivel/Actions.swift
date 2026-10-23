@@ -19,11 +19,28 @@ final class FileActions: NSObject, NSSharingServicePickerDelegate {
     /// Compress and Resize join the wheel when every file is a photo or video.
     static let zipItem = WheelItem(id: "zip", label: "Zip", symbol: "doc.zipper")
     static let stripItem = WheelItem(id: "strip", label: "No Location", symbol: "location.slash")
+    static let cropItem = WheelItem(id: "crop", label: "Crop", symbol: "crop")
+    static let trimItem = WheelItem(id: "trim", label: "Trim", symbol: "scissors")
 
-    /// Zip for anything; photos and videos add Compress, Resize, Send and No Location; PDFs add Compress.
+    static var allItems: [WheelItem] { items + [zipItem] + mediaItems + [stripItem, cropItem, trimItem] }
+
+    /// The slices for these files, in the user's order, without the ones they hid.
     static func items(for urls: [URL]) -> [WheelItem] {
+        let prefs = Prefs.shared
+        let rank = Dictionary(uniqueKeysWithValues: prefs.actionOrder.enumerated().map { ($1, $0) })
+        return available(for: urls).filter { !prefs.hiddenActions.contains($0.id) }
+            .sorted { (rank[$0.id] ?? .max) < (rank[$1.id] ?? .max) }
+    }
+
+    /// Zip for anything; photos and videos add Compress, Resize, Send and No Location (plus Crop or Trim); PDFs add Compress.
+    static func available(for urls: [URL]) -> [WheelItem] {
         guard !urls.isEmpty else { return items }
-        if urls.allSatisfy(Converter.canUseTools) { return items + [zipItem] + mediaItems + [stripItem] }
+        if urls.allSatisfy(Converter.canUseTools) {
+            var list = items + [zipItem] + mediaItems + [stripItem]
+            if urls.allSatisfy({ Converter.imageIn.contains(Converter.ext($0)) }) { list.append(cropItem) }
+            if urls.allSatisfy({ Converter.trimIn.contains(Converter.ext($0)) }) { list.append(trimItem) }
+            return list
+        }
         if urls.allSatisfy({ Converter.ext($0) == "pdf" }) { return items + [zipItem, mediaItems[0]] }
         return items + [zipItem]
     }
@@ -40,6 +57,8 @@ final class FileActions: NSObject, NSSharingServicePickerDelegate {
     var report: (String, String) -> Void = { _, _ in }
     /// Runs a compress/resize preset through the app's normal conversion path.
     var runTool: ([URL], String) -> Void = { _, _ in }
+    /// Opens the Crop or Trim window.
+    var openEditor: (String, [URL]) -> Void = { _, _ in }
     private var anchor: NSPanel?
     private var presetURLs: [URL] = []
 
@@ -68,6 +87,8 @@ final class FileActions: NSObject, NSSharingServicePickerDelegate {
             showPresets(id, urls, what, at: point)
         case "zip", "strip":
             runTool(urls, id)
+        case "crop", "trim":
+            openEditor(id, urls)
         case "terminal":
             let folders = Set(urls.map { $0.hasDirectoryPath ? $0 : $0.deletingLastPathComponent() })
             let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")

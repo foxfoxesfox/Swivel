@@ -3,6 +3,18 @@
 All notable changes to Swivel. Newest first.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [2.4] - 2026-10-23
+
+Edit before you share, shape the wheel your way, and let Swivel work on its own.
+
+### Added
+- **Crop** for photos (actions wheel): drag a frame on a preview, with Free, 1:1, 4:3, 16:9 and 9:16. Several photos are cropped one after another. Saved as "<name> cropped".
+- **Trim** for MP4, MOV and M4V videos (actions wheel), using macOS's own trim bar. Lossless and fast: the streams are copied, not re-encoded. Saved as "<name> trimmed".
+- **Wheel customisation** in Settings: reorder or hide action slices, and hide formats you never use from the convert wheel.
+- **Browser drag:** drag an image or a link to a file out of Safari, Chrome or another browser, tap the convert key, and pick a format. The original is saved to Downloads and converted from there.
+- **Watch folders:** choose a folder and a format (or Compress, Remove location, Send), and new files that land there are converted automatically, e.g. Desktop screenshots → JPG. Originals are kept, unfinished downloads are waited for, and Swivel never re-processes its own results.
+- **Markdown and EPUB:** convert to PDF, Word, HTML, RTF, TXT and ODT. EPUB chapters keep their reading order.
+
 ## [2.3] - 2026-10-23
 
 More formats, more tools, and no Homebrew needed.
@@ -98,7 +110,8 @@ First release: an offline file converter in the menu bar.
 - Drag-to-Applications installer (DMG) and an original app icon.
 - Works without the Accessibility permission. Nothing is uploaded; everything runs on your Mac.
 
-[2.3]: https://github.com/foxfoxesfox/Swivel/compare/20027e4...HEAD
+[2.4]: https://github.com/foxfoxesfox/Swivel/compare/f3d138b...HEAD
+[2.3]: https://github.com/foxfoxesfox/Swivel/compare/20027e4...f3d138b
 [2.2]: https://github.com/foxfoxesfox/Swivel/compare/f59abb9...20027e4
 [2.1]: https://github.com/foxfoxesfox/Swivel/compare/5d80321...f59abb9
 [2.0]: https://github.com/foxfoxesfox/Swivel/compare/f559c0e...5d80321

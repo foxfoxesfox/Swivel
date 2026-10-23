@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import CoreGraphics
 import ImageIO
 import PDFKit
@@ -19,7 +20,9 @@ enum Converter {
     static let imageIn = Set(["jpg", "png", "heic", "tiff", "bmp", "gif", "webp", "avif"]).union(rawIn)
     static let audioIn: Set = ["mp3", "m4a", "wav", "flac", "ogg", "opus", "aiff", "wma", "aac"]
     static let videoIn: Set = ["mp4", "mov", "mkv", "webm", "avi", "wmv", "flv", "mpg", "m4v", "3gp", "ts"]
-    static let docIn: Set = ["docx", "doc", "rtf", "odt", "html", "txt"]
+    static let docIn: Set = ["docx", "doc", "rtf", "odt", "html", "txt", "md", "epub"]
+    /// Videos macOS can play and cut losslessly (Trim).
+    static let trimIn: Set = ["mp4", "mov", "m4v"]
     static let archiveIn: Set = ["zip", "tar", "gz", "tgz", "bz2", "xz"]
     static let subtitleIn: Set = ["srt", "vtt", "ass"]
     /// Everything that needs ffmpeg to convert at all.
@@ -53,13 +56,15 @@ enum Converter {
 
     static func ext(_ url: URL) -> String {
         let e = url.pathExtension.lowercased()
-        return ["jpeg": "jpg", "tif": "tiff", "heif": "heic", "aif": "aiff", "htm": "html", "mpeg": "mpg", "mts": "ts"][e] ?? e
+        return ["jpeg": "jpg", "tif": "tiff", "heif": "heic", "aif": "aiff", "htm": "html", "mpeg": "mpg", "mts": "ts", "markdown": "md"][e] ?? e
     }
 
     static func label(_ target: String) -> String {
         if target.hasPrefix("compress-") { return "Compress" }
         if target.hasPrefix("send-") { return "Send-ready" }
         if target == "strip" { return "Remove location" }
+        if target.hasPrefix("crop-") { return "Crop" }
+        if target.hasPrefix("trim-") { return "Trim" }
         if target == "combine" { return "One PDF" }
         if isTool(target) { return "Resize" }
         return ["split", "merge", "extract"].contains(target) ? target.capitalized : target.uppercased()
@@ -70,6 +75,7 @@ enum Converter {
     /// Tool targets: "compress-high|balanced|small", "scale-<percent>", "fit-<longest side px>".
     static func isTool(_ target: String) -> Bool {
         target.hasPrefix("compress-") || target.hasPrefix("scale-") || target.hasPrefix("fit-") || target.hasPrefix("send-") || target == "strip"
+            || target.hasPrefix("crop-") || target.hasPrefix("trim-")
     }
 
     /// Lossy image quality (0–1) and H.264 CRF for each compress level.
@@ -307,6 +313,14 @@ enum Converter {
     static func convert(_ src: URL, to target: String) throws -> URL {
         let e = ext(src)
         if target.hasPrefix("compress-") && e == "pdf" { return try compressPDF(src) }
+        if target.hasPrefix("crop-") {
+            guard imageIn.contains(e) else { throw ConvertError("Crop works on photos") }
+            return try crop(src, target)
+        }
+        if target.hasPrefix("trim-") {
+            guard trimIn.contains(e) else { throw ConvertError("Trim works on MP4, MOV and M4V videos") }
+            return try trim(src, target)
+        }
         if isTool(target) {
             guard canUseTools(src) else { throw ConvertError("Compress and Resize work on photos and videos") }
             if target == "strip" { return try stripLocation(src) }
@@ -539,14 +553,177 @@ enum Converter {
     /// Word, RTF, ODT, HTML and text via macOS's own converter (textutil); PDF by laying the text out on pages.
     static func convertDocument(_ src: URL, to target: String) throws -> URL {
         let out = output(for: src, ext: target)
+        let (input, cleanup) = try documentInput(src) // Markdown and EPUB become HTML first
+        defer { cleanup() }
         do {
-            if target == "pdf" { try documentToPDF(src, out) }
-            else { try run("/usr/bin/textutil", ["-convert", target, "-output", out.path, src.path]) }
+            if target == "pdf" { try documentToPDF(input, out) }
+            else { try run("/usr/bin/textutil", ["-convert", target, "-output", out.path, input.path]) }
         } catch {
             try? FileManager.default.removeItem(at: out)
             throw error
         }
         guard FileManager.default.fileExists(atPath: out.path) else { throw ConvertError("Couldn't convert this document") }
+        return out
+    }
+
+    /// The file the document converters read: the source itself, or an HTML version of Markdown/EPUB.
+    static func documentInput(_ src: URL) throws -> (URL, () -> Void) {
+        switch ext(src) {
+        case "md":
+            let dir = tempURL("md")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let text = try (try? String(contentsOf: src, encoding: .utf8)) ?? String(contentsOf: src, encoding: .isoLatin1)
+            let html = dir.appendingPathComponent(baseName(src) + ".html")
+            try markdownToHTML(text).write(to: html, atomically: true, encoding: .utf8)
+            return (html, { try? FileManager.default.removeItem(at: dir) })
+        case "epub":
+            let book = try epubToHTML(src)
+            return (book.html, { try? FileManager.default.removeItem(at: book.dir) })
+        default:
+            return (src, {})
+        }
+    }
+
+    /// A small Markdown → HTML converter: headings, paragraphs, lists, quotes, code, rules, bold, italic, links.
+    static func markdownToHTML(_ markdown: String) -> String {
+        func escape<S: StringProtocol>(_ s: S) -> String {
+            s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
+        }
+        func inline<S: StringProtocol>(_ s: S) -> String {
+            var t = escape(s)
+            for (pattern, template) in [
+                (#"`([^`]+)`"#, "<code>$1</code>"),
+                (#"!\[([^\]]*)\]\(([^)\s]+)\)"#, "<img alt=\"$1\" src=\"$2\">"),
+                (#"\[([^\]]+)\]\(([^)\s]+)\)"#, "<a href=\"$2\">$1</a>"),
+                (#"\*\*([^*]+)\*\*"#, "<b>$1</b>"),
+                (#"__([^_]+)__"#, "<b>$1</b>"),
+                (#"(?<![*\w])\*([^*\n]+)\*(?![*\w])"#, "<i>$1</i>"),
+                (#"(?<![_\w])_([^_\n]+)_(?![_\w])"#, "<i>$1</i>"),
+            ] { t = t.replacingOccurrences(of: pattern, with: template, options: .regularExpression) }
+            return t
+        }
+        var html = [#"<html><head><meta charset="utf-8"><style>body{font-family:-apple-system,Helvetica;font-size:12pt;line-height:1.4}code,pre{font-family:Menlo,monospace;font-size:10.5pt}pre{background:#f4f4f4;padding:8px}blockquote{color:#555;border-left:3px solid #ccc;padding-left:10px}</style></head><body>"#]
+        var paragraph: [String] = [], list: String?, code: [Substring]?
+        func flushParagraph() { if !paragraph.isEmpty { html.append("<p>" + paragraph.joined(separator: " ") + "</p>"); paragraph = [] } }
+        func closeList() { if let l = list { html.append("</\(l)>"); list = nil } }
+        func openList(_ kind: String) { flushParagraph(); if list != kind { closeList(); html.append("<\(kind)>"); list = kind } }
+        for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("```") {
+                if let lines = code { html.append("<pre><code>" + lines.map(escape).joined(separator: "\n") + "</code></pre>"); code = nil }
+                else { flushParagraph(); closeList(); code = [] }
+                continue
+            }
+            if code != nil { code?.append(line); continue }
+            if t.isEmpty { flushParagraph(); closeList(); continue }
+            if let m = t.range(of: #"^#{1,6} "#, options: .regularExpression) {
+                flushParagraph(); closeList()
+                let level = t[m].count - 1
+                html.append("<h\(level)>\(inline(t[m.upperBound...]))</h\(level)>")
+            } else if t.range(of: #"^(-{3,}|\*{3,}|_{3,})$"#, options: .regularExpression) != nil {
+                flushParagraph(); closeList(); html.append("<hr>")
+            } else if let m = t.range(of: #"^[-*+] "#, options: .regularExpression) {
+                openList("ul"); html.append("<li>\(inline(t[m.upperBound...]))</li>")
+            } else if let m = t.range(of: #"^\d+[.)] "#, options: .regularExpression) {
+                openList("ol"); html.append("<li>\(inline(t[m.upperBound...]))</li>")
+            } else if t.hasPrefix(">") {
+                flushParagraph(); closeList()
+                html.append("<blockquote>\(inline(t.dropFirst().drop(while: { $0 == " " })))</blockquote>")
+            } else {
+                closeList(); paragraph.append(inline(t))
+            }
+        }
+        if let lines = code { html.append("<pre><code>" + lines.map(escape).joined(separator: "\n") + "</code></pre>") }
+        flushParagraph(); closeList()
+        return html.joined(separator: "\n") + "</body></html>"
+    }
+
+    /// An EPUB's chapters, in reading (spine) order, joined into one HTML file next to the first chapter
+    /// so relative image paths still resolve. `dir` is the unpacked book, to delete afterwards.
+    static func epubToHTML(_ src: URL) throws -> (html: URL, dir: URL) {
+        let dir = tempURL("epub")
+        try run("/usr/bin/ditto", ["-x", "-k", src.path, dir.path])
+        func read(_ url: URL) throws -> String {
+            try (try? String(contentsOf: url, encoding: .utf8)) ?? String(contentsOf: url, encoding: .isoLatin1)
+        }
+        func firstMatch(_ pattern: String, in text: String) -> String? {
+            guard let r = text.range(of: pattern, options: .regularExpression) else { return nil }
+            return String(text[r])
+        }
+        func attribute(_ name: String, in tag: String) -> String? {
+            firstMatch(#"\b\#(name)\s*=\s*"[^"]*""#, in: tag).flatMap { $0.split(separator: "\"", omittingEmptySubsequences: false).dropFirst().first.map(String.init) }
+        }
+        do {
+            let container = try read(dir.appendingPathComponent("META-INF/container.xml"))
+            guard let opfPath = firstMatch(#"<rootfile\b[^>]*>"#, in: container).flatMap({ attribute("full-path", in: $0) }) else {
+                throw ConvertError("This EPUB has no table of contents file")
+            }
+            let opf = dir.appendingPathComponent(opfPath)
+            let opfText = try read(opf)
+            var manifest: [String: String] = [:]
+            for match in opfText.matches(#"<item\b[^>]*>"#) {
+                if let id = attribute("id", in: match), let href = attribute("href", in: match) { manifest[id] = href }
+            }
+            let chapters = opfText.matches(#"<itemref\b[^>]*>"#).compactMap { attribute("idref", in: $0) }
+                .compactMap { manifest[$0] }
+                .map { opf.deletingLastPathComponent().appendingPathComponent($0.removingPercentEncoding ?? $0) }
+            var bodies: [String] = []
+            for chapter in chapters {
+                let text = try read(chapter)
+                bodies.append(firstMatch(#"(?s)<body[^>]*>.*</body>"#, in: text) ?? text)
+            }
+            guard let first = chapters.first, !bodies.isEmpty else { throw ConvertError("No chapters found in this EPUB") }
+            let html = first.deletingLastPathComponent().appendingPathComponent("swivel-book.html")
+            try (#"<html><head><meta charset="utf-8"></head>"# + bodies.joined(separator: "<hr>") + "</html>")
+                .write(to: html, atomically: true, encoding: .utf8)
+            return (html, dir)
+        } catch {
+            try? FileManager.default.removeItem(at: dir)
+            throw error
+        }
+    }
+
+    // MARK: - Crop, trim
+
+    /// "crop-X-Y-W-H": a rectangle in pixels from the top-left of the (upright) photo.
+    static func crop(_ src: URL, _ target: String) throws -> URL {
+        let n = target.split(separator: "-").dropFirst().compactMap { Int($0) }
+        let image = try loadImage(src)
+        guard n.count == 4, n[2] > 0, n[3] > 0 else { throw ConvertError("That crop area isn't valid") }
+        let rect = CGRect(x: n[0], y: n[1], width: n[2], height: n[3]).intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        guard !rect.isNull, rect.width >= 1, rect.height >= 1, let cropped = image.cropping(to: rect) else {
+            throw ConvertError("That crop area is outside the photo")
+        }
+        let e = ext(src), outExt = rawIn.contains(e) ? "jpg" : e
+        let out = output(for: src, suffix: " cropped", ext: outExt)
+        try save(cropped, to: out, ext: outExt)
+        return out
+    }
+
+    /// "trim-START-END" in seconds. Lossless and fast: macOS copies the streams and marks the exact start.
+    static func trim(_ src: URL, _ target: String) throws -> URL {
+        let n = target.split(separator: "-").dropFirst().compactMap { Double($0) }
+        guard n.count == 2, n[0] >= 0, n[1] > n[0] else { throw ConvertError("That trim range isn't valid") }
+        guard let export = AVAssetExportSession(asset: AVURLAsset(url: src), presetName: AVAssetExportPresetPassthrough) else {
+            throw ConvertError("This video can't be trimmed")
+        }
+        let e = ext(src)
+        let out = output(for: src, suffix: " trimmed", ext: e)
+        export.outputURL = out
+        export.outputFileType = e == "mp4" ? .mp4 : e == "m4v" ? .m4v : .mov
+        export.timeRange = CMTimeRange(start: CMTime(seconds: n[0], preferredTimescale: 600),
+                                       end: CMTime(seconds: n[1], preferredTimescale: 600))
+        export.shouldOptimizeForNetworkUse = true
+        let done = DispatchSemaphore(value: 0)
+        export.exportAsynchronously { done.signal() }
+        while done.wait(timeout: .now() + 0.2) == .timedOut {
+            Job.current?.report(Double(export.progress))
+            if Job.current?.isCancelled == true { export.cancelExport() }
+        }
+        guard export.status == .completed else {
+            try? FileManager.default.removeItem(at: out)
+            throw ConvertError(export.status == .cancelled ? "Cancelled" : export.error?.localizedDescription ?? "Trim failed")
+        }
         return out
     }
 
@@ -775,4 +952,10 @@ enum Converter {
 
 private extension String {
     func ifEmpty(_ fallback: String) -> String { trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallback : self }
+
+    /// Every match of a regular expression, in order.
+    func matches(_ pattern: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        return regex.matches(in: self, range: NSRange(startIndex..., in: self)).compactMap { Range($0.range, in: self).map { String(self[$0]) } }
+    }
 }
