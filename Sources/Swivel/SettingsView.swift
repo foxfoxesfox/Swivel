@@ -88,7 +88,7 @@ struct WelcomeView: View {
                 feature("arrow.triangle.2.circlepath", "Convert without opening an app",
                         "Turn photos, audio, videos and PDFs into other formats right from Finder.")
                 feature("square.and.arrow.up", "Share and move files fast",
-                        "AirDrop, share, copy, move, compress or resize, right where you are.")
+                        "AirDrop, share, compress, or shrink a video to fit Discord, WhatsApp or email.")
                 feature("lock.shield", "Private and offline",
                         "Everything happens on your Mac. Nothing is ever uploaded.")
             }
@@ -232,7 +232,7 @@ struct HowTo: View {
         }
         if prefs.actionsDrag {
             step("square.and.arrow.up", "Share: drag, then tap \(prefs.actionsKey.title)",
-                 "Let go on AirDrop, Share, Copy, Move, Copy Path or Terminal. Photos and videos also get Compress and Resize.")
+                 "Let go on AirDrop, Share, Copy, Move, Copy Path or Terminal. Photos and videos also get Compress, Resize and Send (fit under 10, 16 or 25 MB).")
         }
         if prefs.actionsFinder {
             step("cursorarrow.click.2", "Share: \(finderMenuPath) Share with Swivel",

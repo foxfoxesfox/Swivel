@@ -1,4 +1,5 @@
 import AppKit
+import QuickLookThumbnailing
 import ServiceManagement
 import SwiftUI
 import UserNotifications
@@ -6,11 +7,16 @@ import UserNotifications
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     let wheel = WheelPanel()
-    var busy = 0 { didSet { updateIcon() } }
     let prefs = Prefs.shared
     let actions = FileActions()
     var lastResult: String?
-    var lastOutput: URL?
+    var lastOutput: URL? { Recents.all.first }
+
+    // Running conversions, their progress (0…1, once known) and their live menu lines.
+    var jobs: [Job] = [] { didSet { updateIcon() } }
+    var progress: [ObjectIdentifier: Double] = [:]
+    var jobMenuItems: [ObjectIdentifier: NSMenuItem] = [:]
+    var thumbnails: [String: NSImage] = [:] // small previews for the Recent menu
     var settingsWindow: NSWindow?
     var welcomeWindow: NSWindow?
 
@@ -31,6 +37,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        center.setNotificationCategories([UNNotificationCategory(identifier: "result", actions: [
+            UNNotificationAction(identifier: "show", title: "Show in Finder"),
+            UNNotificationAction(identifier: "undo", title: "Undo", options: [.destructive]),
+        ], intentIdentifiers: [])])
+        Recents.all.forEach(cacheThumbnail)
 
         actions.report = { [weak self] title, body in self?.notify(title, body) }
         actions.runTool = { [weak self] urls, preset in self?.convert(urls, to: preset) }
@@ -79,14 +90,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         else { return }
         let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
         let items = self.items(mode, urls)
-        if !items.isEmpty { wheel.show(at: NSEvent.mouseLocation, items: items, mode: mode, fileCount: urls.count) }
+        if !items.isEmpty { wheel.show(at: NSEvent.mouseLocation, items: items, mode: mode, files: urls) }
         else if mode == .convert { explainMissingFFmpeg(urls) }
     }
 
     func items(_ mode: WheelMode, _ urls: [URL]) -> [WheelItem] {
         guard !urls.isEmpty else { return [] }
         if mode == .actions { return FileActions.items(for: urls) }
-        return Converter.targets(for: urls).map { WheelItem(id: $0, label: Converter.label($0)) }
+        // Smart wheel: the usual format for this file type goes first (top slice) and is highlighted.
+        let targets = Converter.targets(for: urls)
+        let favorite = Usage.favorite(Converter.ext(urls[0])).flatMap { targets.contains($0) ? $0 : nil }
+        let ordered = favorite.map { fav in [fav] + targets.filter { $0 != fav } } ?? targets
+        return ordered.map { WheelItem(id: $0, label: Converter.label($0), suggested: $0 == favorite) }
     }
 
     /// No wheel for audio/video without ffmpeg: say why instead of doing nothing.
@@ -116,22 +131,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             if explainMissingFFmpeg(urls) { return }
             return notify("Nothing to convert", "Swivel can't convert \(urls.first?.lastPathComponent ?? "that").")
         }
-        wheel.show(at: NSEvent.mouseLocation, items: items, mode: mode, fileCount: urls.count, clickURLs: urls)
+        wheel.show(at: NSEvent.mouseLocation, items: items, mode: mode, files: urls, clickMode: true)
     }
 
     // MARK: - Converting
 
     func convert(_ urls: [URL], to target: String) {
-        busy += 1
+        if !Converter.isTool(target) { Set(urls.map(Converter.ext)).forEach { Usage.record($0, target) } }
+        let job = Job(name: urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) files")
+        let id = ObjectIdentifier(job)
+        var lastSent = -1.0 // only touched on the job's background thread
+        job.onProgress = { [weak self] fraction in
+            guard fraction - lastSent >= 0.01 || fraction >= 1 else { return } // ~100 UI updates max
+            lastSent = fraction
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.progress[id] = fraction
+                self.updateIcon()
+                self.jobMenuItems[id]?.title = self.jobTitle(job)
+            }
+        }
+        jobs.append(job)
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = Converter.convertAll(urls, to: target)
-            DispatchQueue.main.async { self.finish(target, urls, result.outputs, result.errors) }
+            let result = Converter.convertAll(urls, to: target, job: job)
+            DispatchQueue.main.async { self.finish(job, target, urls, result.outputs, result.errors) }
         }
     }
 
-    func finish(_ target: String, _ sources: [URL], _ outputs: [URL], _ errors: [String]) {
-        busy -= 1
-        if let last = outputs.last { lastOutput = last }
+    func jobTitle(_ job: Job) -> String {
+        "Converting \(job.name)" + (progress[ObjectIdentifier(job)].map { " — \(Int($0 * 100))%" } ?? "…")
+    }
+
+    @objc func cancelJob(_ item: NSMenuItem) { (item.representedObject as? Job)?.cancel() }
+
+    func finish(_ job: Job, _ target: String, _ sources: [URL], _ outputs: [URL], _ errors: [String]) {
+        progress[ObjectIdentifier(job)] = nil
+        jobs.removeAll { $0 === job }
+        Recents.add(outputs)
+        outputs.forEach(cacheThumbnail)
+        if job.isCancelled {
+            lastResult = "Last conversion cancelled"
+            return notify("Cancelled", outputs.isEmpty ? "Nothing was saved." : "\(outputs.count) finished before you cancelled.", outputs: outputs)
+        }
         let label = Converter.label(target)
         if errors.isEmpty {
             lastResult = "Last: \(outputs.count == 1 ? outputs[0].lastPathComponent : "\(outputs.count) files") ✓"
@@ -142,24 +183,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                                               countStyle: .file)
                 }
                 let lines = zip(sources, outputs).map { "\($1.lastPathComponent): \(size($0)) → \(size($1))" }
-                notify(label == "Compress" ? "Compressed" : "Resized", lines.joined(separator: "\n"))
+                let done = ["Compress": "Compressed", "Resize": "Resized", "Send-ready": "Ready to send"][label] ?? label
+                notify(done, lines.joined(separator: "\n"), outputs: outputs)
             } else {
-                notify("Converted to \(label)", outputs.map(\.lastPathComponent).joined(separator: ", "))
+                notify("Converted to \(label)", outputs.map(\.lastPathComponent).joined(separator: ", "), outputs: outputs)
             }
         } else {
             lastResult = "Last conversion failed"
             let failed = Converter.isTool(target) ? "\(label) failed" : "\(label) conversion failed"
             let title = outputs.isEmpty ? failed : "\(errors.count) of \(errors.count + outputs.count) failed"
-            notify(title, errors.joined(separator: "\n"))
+            notify(title, errors.joined(separator: "\n"), outputs: outputs)
         }
     }
 
-    /// `opensSettings`: clicking the notification opens Settings instead of the last output.
-    func notify(_ title: String, _ body: String, opensSettings: Bool = false) {
+    /// `opensSettings`: clicking opens Settings. `outputs`: adds Show in Finder / Undo for the files Swivel made.
+    func notify(_ title: String, _ body: String, opensSettings: Bool = false, outputs: [URL] = []) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         if opensSettings { content.userInfo = ["open": "settings"] }
+        if !outputs.isEmpty {
+            content.categoryIdentifier = "result"
+            content.userInfo = ["outputs": outputs.map(\.path)]
+        }
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
@@ -170,16 +216,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
-        let opensSettings = response.notification.request.content.userInfo["open"] as? String == "settings"
-        DispatchQueue.main.async { opensSettings ? self.showSettings() : self.showLastOutput() }
+        let info = response.notification.request.content.userInfo
+        let outputs = (info["outputs"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+        let action = response.actionIdentifier
+        DispatchQueue.main.async {
+            if action == "undo" { self.undo(outputs) }
+            else if info["open"] as? String == "settings" { self.showSettings() }
+            else if !outputs.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(outputs) }
+            else { self.showLastOutput() }
+        }
         completionHandler()
+    }
+
+    /// Moves the files a conversion made (never the originals) to the Trash, so Undo can itself be undone.
+    func undo(_ outputs: [URL]) {
+        let trashed = outputs.filter { (try? FileManager.default.trashItem(at: $0, resultingItemURL: nil)) != nil }
+        if trashed.isEmpty { return notify("Nothing to undo", "Those files were already moved or deleted.") }
+        notify("Moved \(trashed.count == 1 ? trashed[0].lastPathComponent : "\(trashed.count) files") to the Trash",
+               "Use Put Back in the Trash if you change your mind.")
+    }
+
+    func cacheThumbnail(_ url: URL) {
+        let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 32, height: 32), scale: 2, representationTypes: .thumbnail)
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { [weak self] rep, _ in
+            guard let image = rep?.nsImage else { return }
+            DispatchQueue.main.async { self?.thumbnails[url.path] = image }
+        }
     }
 
     // MARK: - Menu
 
+    /// Pie when idle; a filling ring while converting (the slowest job); hourglass until progress is known.
     func updateIcon() {
-        statusItem.button?.image = NSImage(systemSymbolName: busy > 0 ? "hourglass" : "chart.pie",
-                                           accessibilityDescription: busy > 0 ? "Swivel (converting)" : "Swivel")
+        guard let button = statusItem.button else { return }
+        if jobs.isEmpty {
+            button.image = NSImage(systemSymbolName: "chart.pie", accessibilityDescription: "Swivel")
+        } else if let fraction = jobs.compactMap({ progress[ObjectIdentifier($0)] }).min() {
+            button.image = ring(fraction)
+            button.setAccessibilityLabel("Swivel, converting, \(Int(fraction * 100)) percent")
+        } else {
+            button.image = NSImage(systemSymbolName: "hourglass", accessibilityDescription: "Swivel, converting")
+        }
+    }
+
+    func ring(_ fraction: Double) -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let c = NSPoint(x: rect.midX, y: rect.midY), radius: CGFloat = 6.5
+            let track = NSBezierPath()
+            track.appendArc(withCenter: c, radius: radius, startAngle: 0, endAngle: 360)
+            track.lineWidth = 2.2
+            NSColor.black.withAlphaComponent(0.25).setStroke()
+            track.stroke()
+            let arc = NSBezierPath()
+            arc.appendArc(withCenter: c, radius: radius, startAngle: 90, endAngle: 90 - 360 * CGFloat(max(fraction, 0.03)), clockwise: true)
+            arc.lineWidth = 2.2
+            arc.lineCapStyle = .round
+            NSColor.black.setStroke()
+            arc.stroke()
+            return true
+        }
+        image.isTemplate = true // menu bar tints it for light/dark
+        return image
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -191,7 +289,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         let ready = prefs.convertDrag ? "Ready: tap \(prefs.convertKey.name) while dragging a file"
                                       : "Ready: right-click a file › Convert with Swivel"
-        _ = add(busy > 0 ? "Converting…" : lastResult ?? ready)
+        jobMenuItems = [:]
+        if jobs.isEmpty { _ = add(lastResult ?? ready) }
+        for job in jobs {
+            jobMenuItems[ObjectIdentifier(job)] = add(jobTitle(job))
+            let cancel = add("Cancel", #selector(cancelJob(_:)))
+            cancel.representedObject = job
+            cancel.indentationLevel = 1
+        }
         if let ff = Converter.ffmpegPath {
             _ = add("ffmpeg: \(ff)")
         } else {
@@ -202,6 +307,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         _ = add("How to Use & Settings…", #selector(showSettings), key: ",")
         add("Launch at Login", #selector(toggleLaunchAtLogin)).state = SMAppService.mainApp.status == .enabled ? .on : .off
         _ = add("Show Last Output in Finder", lastOutput == nil ? nil : #selector(showLastOutput))
+        let recents = Recents.all
+        let recentItem = add("Recent Conversions")
+        if !recents.isEmpty {
+            let sub = NSMenu()
+            for url in recents {
+                let item = sub.addItem(withTitle: url.lastPathComponent, action: #selector(revealRecent(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = url
+                item.toolTip = url.path
+                let icon = thumbnails[url.path] ?? NSWorkspace.shared.icon(forFile: url.path)
+                icon.size = NSSize(width: 16, height: 16)
+                item.image = icon
+            }
+            sub.addItem(.separator())
+            sub.addItem(withTitle: "Clear Recents", action: #selector(clearRecents), keyEquivalent: "").target = self
+            recentItem.submenu = sub
+        }
         menu.addItem(.separator())
         _ = add("Quit Swivel", #selector(quit), key: "q")
     }
@@ -279,6 +401,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc func showLastOutput() {
         if let lastOutput { NSWorkspace.shared.activateFileViewerSelecting([lastOutput]) }
     }
+
+    @objc func revealRecent(_ item: NSMenuItem) {
+        if let url = item.representedObject as? URL { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+    }
+
+    @objc func clearRecents() { Recents.clear() }
 
     @objc func quit() { NSApp.terminate(nil) }
 }

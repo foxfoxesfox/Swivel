@@ -13,6 +13,7 @@ final class FileActions: NSObject, NSSharingServicePickerDelegate {
     static let mediaItems = [
         WheelItem(id: "compress", label: "Compress", symbol: "arrow.down.right.and.arrow.up.left"),
         WheelItem(id: "resize", label: "Resize", symbol: "aspectratio"),
+        WheelItem(id: "send", label: "Send", symbol: "paperplane"),
     ]
 
     /// Compress and Resize join the wheel when every file is a photo or video.
@@ -24,6 +25,8 @@ final class FileActions: NSObject, NSSharingServicePickerDelegate {
         "compress": [("compress-high", "Best quality"), ("compress-balanced", "Balanced"), ("compress-small", "Smallest file")],
         "resize": [("scale-50", "Half size (50%)"), ("scale-25", "Quarter size (25%)"),
                    ("fit-1920", "Fit within 1920 px"), ("fit-1280", "Fit within 1280 px"), ("fit-640", "Fit within 640 px")],
+        // Upload limits change over time; the MB figure in each title is what Swivel actually targets.
+        "send": [("send-10", "Discord · under 10 MB"), ("send-16", "WhatsApp · under 16 MB"), ("send-25", "Email · under 25 MB")],
     ]
 
     /// Shows a result to the user (the app posts it as a notification).
@@ -54,7 +57,7 @@ final class FileActions: NSObject, NSSharingServicePickerDelegate {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(urls.map(\.path).joined(separator: "\n"), forType: .string)
             report(urls.count == 1 ? "Copied path" : "Copied \(urls.count) paths", urls.map(\.path).joined(separator: "\n"))
-        case "compress", "resize":
+        case "compress", "resize", "send":
             showPresets(id, urls, what, at: point)
         case "terminal":
             let folders = Set(urls.map { $0.hasDirectoryPath ? $0 : $0.deletingLastPathComponent() })
@@ -69,7 +72,7 @@ final class FileActions: NSObject, NSSharingServicePickerDelegate {
     private func showPresets(_ id: String, _ urls: [URL], _ what: String, at point: NSPoint) {
         presetURLs = urls
         let menu = NSMenu()
-        menu.addItem(withTitle: "\(id == "compress" ? "Compress" : "Resize") \(what)", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "\(["compress": "Compress", "resize": "Resize", "send": "Make sendable:"][id]!) \(what)", action: nil, keyEquivalent: "")
         for preset in Self.presets[id]! {
             let item = menu.addItem(withTitle: preset.title, action: #selector(pickPreset(_:)), keyEquivalent: "")
             item.target = self
@@ -79,6 +82,10 @@ final class FileActions: NSObject, NSSharingServicePickerDelegate {
         if id == "compress", urls.contains(where: { ["png", "tiff", "bmp", "gif"].contains(Converter.ext($0)) }) {
             menu.addItem(.separator())
             menu.addItem(withTitle: "PNG, TIFF, BMP and GIF are saved as JPG", action: nil, keyEquivalent: "")
+        }
+        if id == "send" {
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "Saved as JPG or MP4, with location data removed", action: nil, keyEquivalent: "")
         }
         NSApp.activate(ignoringOtherApps: true)
         menu.popUp(positioning: nil, at: point, in: nil)

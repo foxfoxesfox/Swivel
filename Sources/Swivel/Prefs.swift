@@ -88,3 +88,41 @@ enum FinderMenu {
         set(.actions, enabled: Prefs.shared.actionsFinder)
     }
 }
+
+/// Counts which format each file type gets converted to, so the wheel can put the usual one first.
+enum Usage {
+    private static let key = "usage"
+    private static var all: [String: [String: Int]] {
+        UserDefaults.standard.dictionary(forKey: key) as? [String: [String: Int]] ?? [:]
+    }
+
+    static func record(_ ext: String, _ target: String) {
+        var counts = all
+        counts[ext, default: [:]][target, default: 0] += 1
+        UserDefaults.standard.set(counts, forKey: key)
+    }
+
+    /// The format picked most for this type, once it has been picked at least twice (ties: alphabetical, so it's stable).
+    static func favorite(_ ext: String) -> String? {
+        guard let best = all[ext]?.max(by: { ($0.value, $1.key) < ($1.value, $0.key) }), best.value >= 2 else { return nil }
+        return best.key
+    }
+}
+
+/// The last 10 files Swivel made, newest first; files that were since moved or deleted drop out.
+enum Recents {
+    private static let key = "recents"
+
+    static var all: [URL] {
+        (UserDefaults.standard.stringArray(forKey: key) ?? []).map { URL(fileURLWithPath: $0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    static func add(_ urls: [URL]) {
+        let new = urls.map(\.path)
+        let kept = (UserDefaults.standard.stringArray(forKey: key) ?? []).filter { !new.contains($0) }
+        UserDefaults.standard.set(Array((new + kept).prefix(10)), forKey: key)
+    }
+
+    static func clear() { UserDefaults.standard.removeObject(forKey: key) }
+}

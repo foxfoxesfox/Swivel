@@ -46,6 +46,7 @@ enum Converter {
 
     static func label(_ target: String) -> String {
         if target.hasPrefix("compress-") { return "Compress" }
+        if target.hasPrefix("send-") { return "Send-ready" }
         if isTool(target) { return "Resize" }
         return target == "split" || target == "merge" ? target.capitalized : target.uppercased()
     }
@@ -54,7 +55,7 @@ enum Converter {
 
     /// Tool targets: "compress-high|balanced|small", "scale-<percent>", "fit-<longest side px>".
     static func isTool(_ target: String) -> Bool {
-        target.hasPrefix("compress-") || target.hasPrefix("scale-") || target.hasPrefix("fit-")
+        target.hasPrefix("compress-") || target.hasPrefix("scale-") || target.hasPrefix("fit-") || target.hasPrefix("send-")
     }
 
     /// Lossy image quality (0–1) and H.264 CRF for each compress level.
@@ -77,7 +78,13 @@ enum Converter {
             try save(image, to: out, ext: outExt, quality: level.quality)
             return try keepIfSmaller(out, than: src)
         }
-        let s = try scale(for: target, longest: max(image.width, image.height))
+        let resized = try scaled(image, by: try scale(for: target, longest: max(image.width, image.height)))
+        let out = output(for: src, suffix: " resized", ext: e)
+        try save(resized, to: out, ext: e)
+        return out
+    }
+
+    static func scaled(_ image: CGImage, by s: Double) throws -> CGImage {
         let w = max(1, Int((Double(image.width) * s).rounded())), h = max(1, Int((Double(image.height) * s).rounded()))
         let space = image.colorSpace.flatMap { $0.model == .rgb ? $0 : nil } ?? CGColorSpace(name: CGColorSpace.sRGB)!
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: space,
@@ -85,9 +92,71 @@ enum Converter {
         else { throw ConvertError("Image too large") }
         ctx.interpolationQuality = .high
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        let out = output(for: src, suffix: " resized", ext: e)
-        try save(ctx.makeImage()!, to: out, ext: e)
-        return out
+        return ctx.makeImage()!
+    }
+
+    // MARK: - Send-ready: fit under a size limit (Discord, WhatsApp, email)
+
+    /// Limit in bytes for "under N MB", with a little headroom for how apps count MB.
+    static func sendLimit(_ mb: Int) -> Int { Int(Double(mb) * 1_000_000 * 0.96) }
+
+    /// JPG under the limit: lowers quality, then size, until it fits. Writing a fresh JPG drops location and other metadata.
+    static func sendImage(_ src: URL, mb: Int) throws -> URL {
+        var image = try flattened(try loadImage(src))
+        let limit = sendLimit(mb)
+        for _ in 0..<10 {
+            for quality in [0.85, 0.7, 0.55] {
+                let data = NSMutableData()
+                guard let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { break }
+                CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+                guard CGImageDestinationFinalize(dest) else { break }
+                if data.length <= limit {
+                    let out = output(for: src, suffix: " (under \(mb) MB)", ext: "jpg")
+                    try (data as Data).write(to: out, options: .withoutOverwriting)
+                    return out
+                }
+            }
+            image = try scaled(image, by: 0.75)
+        }
+        throw ConvertError("Couldn't get this image under \(mb) MB")
+    }
+
+    /// MP4 under the limit: picks a bitrate from the length, lowers resolution when the bitrate is low,
+    /// encodes in two passes for an accurate size, and drops location metadata.
+    static func sendVideo(_ src: URL, mb: Int) throws -> URL {
+        guard ffmpegPath != nil, let seconds = duration(src.path), seconds > 0 else {
+            throw ConvertError("Couldn't read how long this video is")
+        }
+        let limit = sendLimit(mb)
+        let budget = Double(limit) * 8 / 1000 / seconds // kbit/s for everything
+        let audio = budget > 1000 ? 128.0 : 64.0
+        var video = budget * 0.97 - audio
+        guard video >= 100 else {
+            throw ConvertError("Too long to fit under \(mb) MB (\(Int(seconds / 60)) min). Try trimming it first.")
+        }
+        let out = output(for: src, suffix: " (under \(mb) MB)", ext: "mp4")
+        for attempt in 0..<2 { // a second, leaner try if the first lands just over
+            let longest = video < 600 ? 854 : video < 1800 ? 1280 : 1920
+            let filter = "scale=w='if(gte(iw,ih),trunc(min(iw,\(longest))/2)*2,-2)':h='if(gte(iw,ih),-2,trunc(min(ih,\(longest))/2)*2)'"
+            let rate = ["-b:v", "\(Int(video))k"]
+            let common = ["-i", src.path, "-map", "0:v:0", "-vf", filter, "-pix_fmt", "yuv420p"]
+            let finish = ["-map", "0:a:0?", "-map_metadata", "-1", "-c:a", "aac", "-b:a", "\(Int(audio))k", "-movflags", "+faststart"]
+            if h264 == "libx264" {
+                let log = tempURL("pass").deletingPathExtension().path
+                defer { ["-0.log", "-0.log.mbtree"].forEach { try? FileManager.default.removeItem(atPath: log + $0) } }
+                try ffmpegPass(common + ["-c:v", "libx264", "-preset", "medium"] + rate + ["-pass", "1", "-passlogfile", log, "-an", "-f", "null"],
+                               span: 0...0.5)
+                try ffmpeg(common + ["-c:v", "libx264", "-preset", "medium"] + rate + ["-pass", "2", "-passlogfile", log] + finish,
+                           out, span: 0.5...1)
+            } else {
+                try ffmpeg(common + ["-c:v", "h264_videotoolbox"] + rate + ["-maxrate", "\(Int(video * 1.2))k"] + finish, out)
+            }
+            let size = (try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if size <= limit { return out }
+            try? FileManager.default.removeItem(at: out)
+            if attempt == 0 { video *= 0.85 }
+        }
+        throw ConvertError("Couldn't get this video under \(mb) MB")
     }
 
     static func videoTool(_ src: URL, _ target: String) throws -> URL {
@@ -161,12 +230,16 @@ enum Converter {
 
     // MARK: - Convert
 
-    static func convertAll(_ urls: [URL], to target: String) -> (outputs: [URL], errors: [String]) {
+    static func convertAll(_ urls: [URL], to target: String, job: Job? = nil) -> (outputs: [URL], errors: [String]) {
+        Job.current = job
+        defer { Job.current = nil }
         if target == "merge" {
             do { return ([try merge(urls)], []) } catch { return ([], [error.localizedDescription]) }
         }
         var outputs: [URL] = [], errors: [String] = []
-        for url in urls {
+        for (i, url) in urls.enumerated() {
+            if job?.isCancelled == true { errors.append("Cancelled"); break }
+            job?.startFile(i, of: urls.count)
             do { outputs.append(try convert(url, to: target)) }
             catch { errors.append("\(url.lastPathComponent): \(error.localizedDescription)") }
         }
@@ -178,6 +251,9 @@ enum Converter {
         let e = ext(src)
         if isTool(target) {
             guard canUseTools(src) else { throw ConvertError("Compress and Resize work on photos and videos") }
+            if let mb = Int(target.dropFirst(5)), target.hasPrefix("send-") {
+                return imageIn.contains(e) ? try sendImage(src, mb: mb) : try sendVideo(src, mb: mb)
+            }
             return imageIn.contains(e) ? try imageTool(src, target) : try videoTool(src, target)
         }
         guard targets(forExt: e).contains(target) else {
@@ -419,19 +495,44 @@ enum Converter {
     }
 
     /// Runs ffmpeg writing to `out`; deletes a half-written `out` on failure.
-    static func ffmpeg(_ args: [String], _ out: URL) throws {
-        guard let ff = ffmpegPath else { throw ConvertError("ffmpeg not found. Install it with: brew install ffmpeg") }
+    static func ffmpeg(_ args: [String], _ out: URL, span: ClosedRange<Double> = 0...1) throws {
         do {
-            try run(ff, ["-nostdin", "-hide_banner", "-loglevel", "error", "-n"] + args + [out.path])
+            try ffmpegRun(args + [out.path], span: span)
         } catch {
             try? FileManager.default.removeItem(at: out)
             throw error
         }
     }
 
+    /// An ffmpeg run with no output file (two-pass encoding's first pass).
+    static func ffmpegPass(_ args: [String], span: ClosedRange<Double>) throws {
+        try ffmpegRun(args + ["-"], span: span)
+    }
+
+    private static func ffmpegRun(_ args: [String], span: ClosedRange<Double>) throws {
+        guard let ff = ffmpegPath else { throw ConvertError("ffmpeg not found. Install it with: brew install ffmpeg") }
+        var progress: ((Double) -> Void)?
+        if let job = Job.current, let i = args.firstIndex(of: "-i"), i + 1 < args.count, let total = duration(args[i + 1]) {
+            progress = { seconds in job.report(span.lowerBound + (span.upperBound - span.lowerBound) * seconds / total) }
+        }
+        let report = progress == nil ? [] : ["-progress", "pipe:1", "-nostats"]
+        try run(ff, ["-nostdin", "-hide_banner", "-loglevel", "error", "-n"] + report + args, progress: progress)
+    }
+
+    /// Media length in seconds, via ffprobe (installed alongside ffmpeg).
+    static func duration(_ path: String) -> Double? {
+        guard let ff = ffmpegPath else { return nil }
+        let probe = URL(fileURLWithPath: ff).deletingLastPathComponent().appendingPathComponent("ffprobe").path
+        guard FileManager.default.isExecutableFile(atPath: probe),
+              let out = try? run(probe, ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path])
+        else { return nil }
+        return Double(out.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     /// Runs a tool, returns stdout+stderr; throws the last lines of output on a non-zero exit.
+    /// With `progress`, ffmpeg's `-progress` lines are parsed (seconds encoded so far) and kept out of the error text.
     @discardableResult
-    static func run(_ exe: String, _ args: [String]) throws -> String {
+    static func run(_ exe: String, _ args: [String], progress: ((Double) -> Void)? = nil) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: exe)
         process.arguments = args
@@ -439,9 +540,23 @@ enum Converter {
         process.standardOutput = pipe
         process.standardError = pipe
         process.standardInput = FileHandle.nullDevice
+        let job = progress == nil ? nil : Job.current // only long ffmpeg runs are cancellable
+        try job?.attach(process)
+        defer { try? job?.attach(nil) }
         try process.run()
-        let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        var text = "", pending = ""
+        while case let chunk = pipe.fileHandleForReading.availableData, !chunk.isEmpty {
+            guard let progress else { text += String(decoding: chunk, as: UTF8.self); continue }
+            pending += String(decoding: chunk, as: UTF8.self)
+            while let newline = pending.firstIndex(of: "\n") {
+                let line = String(pending[..<newline])
+                pending.removeSubrange(...newline)
+                if line.hasPrefix("out_time_us="), let us = Double(line.dropFirst(12)) { progress(us / 1_000_000) }
+                else if line.range(of: #"^[a-z0-9_]+="#, options: .regularExpression) == nil { text += line + "\n" }
+            }
+        }
         process.waitUntilExit()
+        if job?.isCancelled == true { throw ConvertError("Cancelled") }
         guard process.terminationStatus == 0 else {
             let tail = text.split(separator: "\n").suffix(3).joined(separator: "\n")
             throw ConvertError(tail.isEmpty ? "\(URL(fileURLWithPath: exe).lastPathComponent) exited with \(process.terminationStatus)" : tail)

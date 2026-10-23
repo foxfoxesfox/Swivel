@@ -6,6 +6,8 @@ Start dragging a file, tap **Shift**, and a format wheel opens at the cursor. Re
 
 macOS 13+, Apple silicon. Everything runs on your Mac; nothing is uploaded.
 
+What's new in each version: [CHANGELOG.md](CHANGELOG.md).
+
 ## Just want the app?
 
 **[Download Swivel.dmg](https://github.com/foxfoxesfox/Swivel/raw/main/dist/Swivel.dmg)** (or clone this repo and open `dist/Swivel.dmg`), double-click it, and drag Swivel into Applications. The first launch needs one extra step; see [Share with a friend](#share-with-a-friend).
@@ -38,17 +40,22 @@ Swivel has two wheels, and each can open in two ways (pick them in the tour or i
 - **Drag, then tap a key:** start dragging one or more files, keep holding, tap the key, then let go on a slice.
 - **Right-click in Finder:** right-click a file and choose the Swivel item. It's at the bottom of the menu, or inside **Services** when you have many. Then click a slice, or press Esc.
 - To cancel, let go or click in the centre ✕, or anywhere off the wheel.
+- The centre shows a preview of the file you're dragging (with a count for several). The format you use most for that type moves to the top slice, in the accent colour.
+- From Finder's right-click, the keyboard works too: **1–9** pick a slice, **← →** move around, **Return** picks, **Esc** cancels. (Not mid-drag: reading keys there would need an extra macOS permission, and Swivel needs none.)
 
 The actions wheel works on any files or folders: **AirDrop**, **Share** (Messages, Mail, Notes…), **Copy** (paste in Finder), **Move** (pick a folder), **Copy Path**, and **Terminal** (opens the folder).
 
-For photos and videos it also has **Compress** and **Resize**, each with a small menu of presets:
+For photos and videos it also has **Compress**, **Resize** and **Send**, each with a small menu of presets:
 
 - **Compress:** Best quality, Balanced or Smallest file. JPG, HEIC, WebP and AVIF keep their format; PNG, TIFF, BMP and GIF become JPG (on a white background). Videos keep their format. If the result wouldn't be smaller, no copy is kept.
 - **Resize:** 50%, 25%, or fit within 1920 / 1280 / 640 px on the longest side. Never enlarges; transparency is kept.
+- **Send:** fit under **10 MB (Discord)**, **16 MB (WhatsApp)** or **25 MB (email)**. Photos become JPG, videos MP4 (sized from their length, two-pass encoded, resolution lowered if needed), and location data is removed. Videos too long to fit get a clear message. Apps change their limits, so the menu shows the MB Swivel aims for.
 
 Results are new files next to the original (`photo compressed.jpg`, `clip resized.mp4`), and the notification shows the size before → after.
 
-Converted files land next to the original: `photo.png` → `photo.jpg`, or `photo 2.jpg` if that name is taken. During a conversion the menu bar icon turns into an hourglass. Click the notification, or choose **Show Last Output in Finder**, to see the result.
+Converted files land next to the original: `photo.png` → `photo.jpg`, or `photo 2.jpg` if that name is taken.
+
+While converting, the menu bar icon becomes a ring that fills up, and the menu shows the percentage with a **Cancel** button (a cancelled file is removed, never left half-written). When it's done, the notification has **Show in Finder** and **Undo** (moves just the new files to the Trash). **Recent Conversions** in the menu keeps your last 10 results.
 
 | Input | Wheel options |
 |---|---|
